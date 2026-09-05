@@ -1,0 +1,24 @@
+# Override para execução com aceleração por GPU NVIDIA (CUDA)
+# Uso: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+
+services:
+  app:
+    environment:
+      - WHISPER_DEVICE=cuda
+      - WHISPER_COMPUTE_TYPE=float16
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

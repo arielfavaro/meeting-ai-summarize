@@ -1,0 +1,52 @@
+# Ambientes virtuais Python
+.venv/
+venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Bytecode e caches Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Variáveis de ambiente e segredos (mantenha apenas .env.example)
+.env
+.env.local
+
+# Dados da aplicação (uploads, áudios processados, banco de dados SQLite e modelos)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Arquivos de áudio/vídeo gerados em testes locais
+tests/sample_test.wav
+*.wav
+*.mp3
+*.mp4
+*.m4a
+*.ogg
+*.webm
+
+# Caches de modelos locais
+models_cache/
+.cache/
+
+# Arquivos de IDEs e Editores
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+
+# Arquivos do Sistema Operacional
+.DS_Store
+Thumbs.db
+desktop.ini

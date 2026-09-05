@@ -1,0 +1,48 @@
+services:
+  # Aplicação Principal (FastAPI + Faster-Whisper + Diarização + Web UI)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meeting-ai-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - whisper_models:/app/data/models_cache
+    environment:
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
+      - DEFAULT_LANGUAGE=${DEFAULT_LANGUAGE:-pt}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - ENABLE_PYANNOTE=${ENABLE_PYANNOTE:-true}
+    depends_on:
+      - ollama
+    networks:
+      - meeting-net
+
+  # Ollama (LLM Local para Geração da Ata Executiva)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: meeting-ai-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - meeting-net
+
+networks:
+  meeting-net:
+    driver: bridge
+
+volumes:
+  whisper_models:
+    name: meeting_ai_whisper_models
+  ollama_models:
+    name: meeting_ai_ollama_models

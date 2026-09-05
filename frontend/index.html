@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MeetingAI | Transcrição, Diarização e Atas com IA Local</title>
+  <meta name="description" content="Sistema 100% local com Docker para transcrição de reuniões, separação de locutores e geração automatizada de atas em Português do Brasil com Faster-Whisper e Ollama.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+  <!-- CABEÇALHO -->
+  <header>
+    <div class="nav-container">
+      <div class="logo-area" onclick="app.switchTab('new')">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14h2v2h-2v-2zm0-10h2v8h-2V6z" />
+          </svg>
+        </div>
+        <div class="logo-text">
+          <h1>MeetingAI</h1>
+          <span>IA Local • PT-BR</span>
+        </div>
+      </div>
+
+      <!-- Abas de Navegação -->
+      <nav class="nav-tabs">
+        <button class="nav-tab-btn active" id="btn-tab-new" onclick="app.switchTab('new')">
+          🎙️ Nova Reunião
+        </button>
+        <button class="nav-tab-btn" id="btn-tab-processing" onclick="app.switchTab('processing')">
+          ⏳ Processamento
+        </button>
+        <button class="nav-tab-btn" id="btn-tab-minutes" onclick="app.switchTab('minutes')">
+          📋 Ata & Resumo
+        </button>
+        <button class="nav-tab-btn" id="btn-tab-transcript" onclick="app.switchTab('transcript')">
+          💬 Transcrição
+        </button>
+        <button class="nav-tab-btn" id="btn-tab-history" onclick="app.switchTab('history')">
+          🗄️ Histórico
+        </button>
+        <button class="nav-tab-btn" id="btn-tab-settings" onclick="app.switchTab('settings')">
+          ⚙️ Ajustes
+        </button>
+      </nav>
+
+      <!-- Status dos Motores de IA -->
+      <div class="header-badges">
+        <div class="status-badge" id="badge-whisper">
+          <span class="status-dot"></span>
+          <span>Whisper: Pronto</span>
+        </div>
+        <div class="status-badge warning" id="badge-ollama">
+          <span class="status-dot"></span>
+          <span id="badge-ollama-text">Ollama: Verificando...</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- CONTEÚDO PRINCIPAL -->
+  <main>
+
+    <!-- ========================================== -->
+    <!-- ABA 1: NOVA REUNIÃO (UPLOAD & GRAVADOR)   -->
+    <!-- ========================================== -->
+    <section id="tab-new" class="tab-panel active">
+      <div class="grid-new-meeting">
+        <!-- Card 1: Upload de Arquivo -->
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">📁 Enviar Gravação</h2>
+          </div>
+          <p class="card-desc">Carregue arquivos de reuniões pré-gravadas (áudio ou vídeo).</p>
+
+          <div class="dropzone" id="audio-dropzone" onclick="document.getElementById('file-input').click()">
+            <input type="file" id="file-input" accept="audio/*,video/*" style="display: none;">
+            <div class="dropzone-icon">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+              </svg>
+            </div>
+            <div class="dropzone-text">
+              <h4>Arraste e solte o arquivo aqui</h4>
+              <p>ou clique para selecionar do computador</p>
+            </div>
+            <div class="dropzone-badges">
+              <span class="badge-format">MP3</span>
+              <span class="badge-format">WAV</span>
+              <span class="badge-format">M4A</span>
+              <span class="badge-format">OGG</span>
+              <span class="badge-format">MP4</span>
+              <span class="badge-format">WEBM</span>
+            </div>
+          </div>
+
+          <div id="file-selected-card" class="selected-file-info" style="display: none;">
+            <span id="selected-file-name">reuniao.mp3</span>
+            <button class="btn btn-secondary btn-sm" onclick="app.clearSelectedFile()">Remover</button>
+          </div>
+        </div>
+
+        <!-- Card 2: Gravador de Microfone -->
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">🎙️ Gravar Agora</h2>
+          </div>
+          <p class="card-desc">Grave a reunião ao vivo usando o microfone do seu navegador.</p>
+
+          <div class="recorder-box">
+            <div class="record-btn-wrapper">
+              <button id="btn-record-mic" class="btn-record" title="Clique para iniciar gravação">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"></path>
+                  <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"></path>
+                </svg>
+              </button>
+            </div>
+            <div class="recording-timer" id="recording-timer">00:00</div>
+            <canvas id="mic-visualizer" class="visualizer-canvas"></canvas>
+            <p id="mic-status-text" style="font-size: 0.82rem; color: var(--text-muted); margin-top: 0.5rem;">
+              Clique no botão para iniciar a gravação
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Configurações da Sessão e Disparo -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">⚙️ Parâmetros da Sessão</h2>
+        </div>
+
+        <div class="form-grid-3">
+          <div class="form-group">
+            <label class="form-label" for="input-meeting-title">Título da Reunião</label>
+            <input type="text" id="input-meeting-title" class="form-input" placeholder="Ex: Alinhamento de Produto Q3">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="select-whisper-model">Modelo de Transcrição (Whisper)</label>
+            <select id="select-whisper-model" class="form-select">
+              <option value="small" selected>Small (Recomendado • Rápido e Preciso)</option>
+              <option value="tiny">Tiny (Ultrarrápido • Testes)</option>
+              <option value="base">Base (Leve)</option>
+              <option value="medium">Medium (Alta Precisão)</option>
+              <option value="large-v3">Large-v3 (Precisão Máxima)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="select-ollama-model">Modelo LLM (Ata & Resumo)</label>
+            <select id="select-ollama-model" class="form-select">
+              <option value="">Carregando modelos do Ollama...</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-grid-3">
+          <div class="form-group">
+            <label class="form-label" for="input-num-speakers">Estimativa de Pessoas (Opcional)</label>
+            <input type="number" id="input-num-speakers" class="form-input" placeholder="Automático" min="1" max="10">
+          </div>
+
+          <div class="form-group" style="grid-column: span 2;">
+            <label class="form-label" for="input-custom-prompt">Instrução Adicional para a Ata (Opcional)</label>
+            <input type="text" id="input-custom-prompt" class="form-input" placeholder="Ex: Dê ênfase especial aos prazos de entrega acordados e responsáveis técnicos.">
+          </div>
+        </div>
+
+        <div style="margin-top: 1rem;">
+          <button class="btn btn-primary btn-lg" id="btn-start-process" onclick="app.startProcessing()">
+            🚀 Iniciar Transcrição, Separação de Pessoas e Geração de Ata
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- ABA 2: PROCESSAMENTO EM TEMPO REAL        -->
+    <!-- ========================================== -->
+    <section id="tab-processing" class="tab-panel">
+      <div class="card progress-card">
+        <h2 class="card-title" style="justify-content: center;">
+          ⚡ Processamento com IA Local em Andamento
+        </h2>
+        <p class="card-desc">Os modelos estão processando seu áudio localmente e em privacidade absoluta.</p>
+
+        <!-- Stepper Visual de Etapas -->
+        <div class="stepper">
+          <div class="step-item" id="step-1">
+            <div class="step-icon">1</div>
+            <div class="step-label">FFmpeg 16kHz</div>
+          </div>
+          <div class="step-item" id="step-2">
+            <div class="step-icon">2</div>
+            <div class="step-label">Separar Vozes</div>
+          </div>
+          <div class="step-item" id="step-3">
+            <div class="step-icon">3</div>
+            <div class="step-label">Faster-Whisper</div>
+          </div>
+          <div class="step-item" id="step-4">
+            <div class="step-icon">4</div>
+            <div class="step-label">Sincronizar</div>
+          </div>
+          <div class="step-item" id="step-5">
+            <div class="step-icon">5</div>
+            <div class="step-label">Ata com LLM</div>
+          </div>
+        </div>
+
+        <!-- Barra de Progresso -->
+        <div class="progress-bar-container">
+          <div class="progress-bar-fill" id="job-progress-fill"></div>
+        </div>
+        <p id="job-current-step-label" style="font-weight: 500; font-size: 0.95rem; margin-bottom: 1.5rem;">
+          Aguardando início...
+        </p>
+
+        <!-- Log em tempo real -->
+        <div class="log-box" id="job-log-box">
+          [Sistema]: Pronto para processamento.
+        </div>
+      </div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- ABA 3: ATA DE REUNIÃO & RESUMO EXECUTIVO  -->
+    <!-- ========================================== -->
+    <section id="tab-minutes" class="tab-panel">
+      <!-- Barra de Ações Rápidas de Exportação -->
+      <div class="minutes-actions-bar">
+        <div>
+          <h2 id="minutes-title" style="font-size: 1.3rem; font-weight: 700;">Ata de Reunião</h2>
+          <div style="display: flex; gap: 0.5rem; margin-top: 0.35rem; flex-wrap: wrap;">
+            <span class="meta-pill" id="minutes-date">📅 Data: --</span>
+            <span class="meta-pill" id="minutes-duration">⏱️ Duração: --</span>
+            <span class="meta-pill" id="minutes-participants">👥 Participantes: --</span>
+          </div>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-secondary btn-sm" onclick="app.copyMinutesText()">
+            📋 Copiar Ata
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick="app.exportFile('md')">
+            📥 Markdown (.md)
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick="app.exportFile('docx')">
+            📄 Word (.docx)
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick="app.exportFile('txt')">
+            📝 Texto (.txt)
+          </button>
+          <button class="btn btn-primary btn-sm" onclick="window.print()">
+            🖨️ Imprimir / PDF
+          </button>
+        </div>
+      </div>
+
+      <!-- Resumo Executivo e Decisões -->
+      <div class="summary-card-grid">
+        <div class="card summary-highlight">
+          <h3 class="card-title">📌 Resumo Executivo</h3>
+          <p id="minutes-exec-summary" style="font-size: 0.95rem; color: #f1f5f9; white-space: pre-line; margin-top: 0.75rem;">
+            Nenhuma reunião carregada ainda.
+          </p>
+        </div>
+
+        <div class="card">
+          <h3 class="card-title">⚖️ Decisões Tomadas</h3>
+          <ul class="decisions-list" id="minutes-decisions-list" style="margin-top: 0.75rem;">
+            <li class="decision-item">
+              <span class="decision-icon">✅</span>
+              <span>Aguardando dados...</span>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Matriz de Ações e Tarefas -->
+      <div class="card" style="margin-bottom: 1.5rem;">
+        <h3 class="card-title">🚀 Plano de Ação e Tarefas</h3>
+        <p class="card-desc">Compromissos, responsáveis e prazos extraídos automaticamente pela IA.</p>
+        <div class="actions-table-wrapper">
+          <table class="actions-table">
+            <thead>
+              <tr>
+                <th style="width: 45%;">Tarefa / Ação</th>
+                <th style="width: 25%;">Responsável</th>
+                <th style="width: 15%;">Prazo</th>
+                <th style="width: 15%;">Status</th>
+              </tr>
+            </thead>
+            <tbody id="minutes-actions-tbody">
+              <tr>
+                <td colspan="4" style="text-align: center; color: var(--text-muted);">Nenhuma tarefa registrada.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Tópicos Discutidos -->
+      <div class="card" style="margin-bottom: 1.5rem;">
+        <h3 class="card-title">💬 Tópicos e Discussões</h3>
+        <div id="minutes-topics-container" style="display: flex; flex-direction: column; gap: 1rem; margin-top: 1rem;">
+          <!-- Dinâmico -->
+        </div>
+      </div>
+
+      <!-- Pontos em Aberto -->
+      <div class="card" id="card-open-points" style="display: none;">
+        <h3 class="card-title">❓ Pontos em Aberto / Próximos Passos</h3>
+        <ul id="minutes-open-points-list" style="margin-top: 0.75rem; padding-left: 1.25rem; color: #cbd5e1;"></ul>
+      </div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- ABA 4: TRANSCRIÇÃO INTERATIVA E LOCUTORES  -->
+    <!-- ========================================== -->
+    <section id="tab-transcript" class="tab-panel">
+      <!-- Player de Áudio Sincronizado Fixo -->
+      <div class="audio-player-sticky">
+        <div class="audio-controls-row">
+          <button class="btn-play-pause" id="audio-play-btn" onclick="audioPlayer.togglePlay()">
+            <svg id="play-icon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7z"/>
+            </svg>
+            <svg id="pause-icon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" style="display: none;">
+              <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+            </svg>
+          </button>
+
+          <div class="audio-seeker">
+            <span class="time-display" id="time-current">00:00</span>
+            <input type="range" class="seeker-slider" id="audio-progress-bar" min="0" max="100" value="0" step="0.1">
+            <span class="time-display" id="time-total">00:00</span>
+          </div>
+
+          <div style="display: flex; gap: 0.35rem;">
+            <button class="btn btn-secondary btn-sm" onclick="audioPlayer.setSpeed(1.0)">1x</button>
+            <button class="btn btn-secondary btn-sm" onclick="audioPlayer.setSpeed(1.25)">1.25x</button>
+            <button class="btn btn-secondary btn-sm" onclick="audioPlayer.setSpeed(1.5)">1.5x</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Barra de Identificação e Renomeação de Locutores -->
+      <div class="speakers-bar">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
+          <div>
+            <h4 style="font-size: 0.95rem; font-weight: 600;">👥 Interlocutores Identificados (Diarização)</h4>
+            <p style="font-size: 0.8rem; color: var(--text-secondary);">
+              Renomeie os oradores (ex: "Locutor 1" ➔ "Carlos") para atualizar a transcrição e a ata.
+            </p>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="app.saveSpeakerNames(false)">
+            Salvar Nomes
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick="app.saveSpeakerNames(true)">
+            Salvar e Re-gerar Ata
+          </button>
+        </div>
+
+        <div class="speakers-list-inputs" id="speakers-inputs-container">
+          <!-- Dinâmico -->
+        </div>
+      </div>
+
+      <!-- Barra de Busca de Trecho de Fala -->
+      <div class="transcript-search">
+        <input type="text" id="transcript-search-input" class="form-input" placeholder="🔍 Filtrar falas por palavra-chave..." oninput="app.filterTranscript(this.value)">
+      </div>
+
+      <!-- Feed dos Diálogos -->
+      <div class="transcript-feed" id="transcript-feed-container">
+        <div class="empty-state">
+          <div class="empty-state-icon">🎙️</div>
+          <p>Nenhuma transcrição carregada ainda.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- ABA 5: HISTÓRICO DE REUNIÕES              -->
+    <!-- ========================================== -->
+    <section id="tab-history" class="tab-panel">
+      <div class="card-header" style="margin-bottom: 1.5rem;">
+        <div>
+          <h2 class="card-title">🗄️ Histórico de Reuniões</h2>
+          <p class="card-desc">Consulte gravações anteriores armazenadas no banco local.</p>
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="app.loadMeetingsHistory()">
+          🔄 Atualizar
+        </button>
+      </div>
+
+      <div style="margin-bottom: 1.5rem;">
+        <input type="text" id="history-search-input" class="form-input" placeholder="🔍 Buscar no histórico por título ou data..." oninput="app.filterHistory(this.value)">
+      </div>
+
+      <div class="meetings-grid" id="history-grid-container">
+        <!-- Dinâmico -->
+      </div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- ABA 6: CONFIGURAÇÕES & DIAGNÓSTICO        -->
+    <!-- ========================================== -->
+    <section id="tab-settings" class="tab-panel">
+      <div class="card" style="max-width: 800px; margin: 0 auto 1.5rem auto;">
+        <h2 class="card-title">⬇️ Modelos Recomendados para Baixar no Ollama</h2>
+        <p class="card-desc">Baixe modelos diretamente pela interface sem precisar abrir o terminal.</p>
+        
+        <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-top: 1rem;">
+          <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 255, 255, 0.03); padding: 0.75rem 1rem; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+            <div>
+              <strong>Llama 3.2 (3B)</strong>
+              <div style="font-size: 0.8rem; color: var(--text-secondary);">Recomendado • Muito rápido, leve e excelente redação em PT-BR (~2.0 GB)</div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btn-pull-llama3" onclick="settingsManager.pullModel('llama3.2:3b', this)">
+              ⬇️ Baixar Modelo
+            </button>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 255, 255, 0.03); padding: 0.75rem 1rem; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+            <div>
+              <strong>Qwen 2.5 (7B)</strong>
+              <div style="font-size: 0.8rem; color: var(--text-secondary);">Máxima Qualidade • Síntese corporativa profunda e estruturação impecável (~4.7 GB)</div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btn-pull-qwen" onclick="settingsManager.pullModel('qwen2.5:7b', this)">
+              ⬇️ Baixar Modelo
+            </button>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 255, 255, 0.03); padding: 0.75rem 1rem; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+            <div>
+              <strong>Mistral (7B)</strong>
+              <div style="font-size: 0.8rem; color: var(--text-secondary);">Focado em Negócios • Excelente raciocínio lógico e síntese de deliberações (~4.1 GB)</div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btn-pull-mistral" onclick="settingsManager.pullModel('mistral:7b', this)">
+              ⬇️ Baixar Modelo
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="max-width: 800px; margin: 0 auto;">
+        <h2 class="card-title">⚙️ Configurações dos Motores de IA</h2>
+        <p class="card-desc">Ajuste os parâmetros de modelos locais, endereços de rede e tokens.</p>
+
+        <div class="form-group">
+          <label class="form-label" for="setting-ollama-url">URL do Servidor Ollama</label>
+          <div style="display: flex; gap: 0.5rem;">
+            <input type="text" id="setting-ollama-url" class="form-input" value="http://localhost:11434" placeholder="http://ollama:11434 ou http://host.docker.internal:11434">
+            <button class="btn btn-secondary" onclick="settingsManager.testOllamaConnection()">
+              Testar Conexão
+            </button>
+          </div>
+          <small style="color: var(--text-muted); font-size: 0.78rem;">
+            No Docker Compose padrão, aponte para <code>http://ollama:11434</code> ou <code>http://host.docker.internal:11434</code> caso use o Ollama instalado no seu host.
+          </small>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="setting-hf-token">Hugging Face Token (Opcional - Pyannote Diarization 3.1)</label>
+          <input type="password" id="setting-hf-token" class="form-input" placeholder="hf_xxxxxxxxxxxxxxxxxxxx">
+          <small style="color: var(--text-muted); font-size: 0.78rem;">
+            Necessário apenas para usar o modelo oficial do Pyannote. Se deixado em branco, o sistema utilizará o <strong>Diarizador Fallback Acústico</strong> nativo sem quebrar.
+          </small>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="setting-whisper-device">Dispositivo de Execução do Whisper</label>
+          <select id="setting-whisper-device" class="form-select">
+            <option value="cpu" selected>CPU (Compatível com qualquer máquina)</option>
+            <option value="cuda">NVIDIA GPU (CUDA - Requer suporte a GPU no Docker)</option>
+          </select>
+        </div>
+
+        <div style="margin-top: 1.5rem; display: flex; justify-content: flex-end;">
+          <button class="btn btn-primary" onclick="settingsManager.saveSettings()">
+            💾 Salvar Preferências
+          </button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Elemento de Áudio Oculto para o Player -->
+  <audio id="global-audio-element" style="display: none;"></audio>
+
+  <!-- SCRIPTS -->
+  <script src="js/player.js"></script>
+  <script src="js/recorder.js"></script>
+  <script src="js/settings.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

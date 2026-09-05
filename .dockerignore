@@ -1,0 +1,15 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.env
+data/
+venv/
+.venv/
+tests/
+README.md
+start.bat
+start.sh
