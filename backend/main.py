@@ -1,4 +1,5 @@
 import os
+import sys
 import uuid
 import json
 import asyncio
@@ -6,6 +7,14 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
+
+# Configurar caminhos para bibliotecas CUDA (CTranslate2 / Faster-Whisper)
+for _dir in [Path("/usr/local/lib/python3.10/site-packages"), Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"]:
+    _cublas_dir = _dir / "nvidia" / "cublas" / "lib"
+    _cudnn_dir = _dir / "nvidia" / "cudnn" / "lib"
+    if _cublas_dir.exists() or _cudnn_dir.exists():
+        _cur = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = f"{_cublas_dir}:{_cudnn_dir}:{_cur}"
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Response
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
@@ -67,10 +76,10 @@ async def run_pipeline_task(job_id: str, file_id: str, title: str, options: Proc
         wav_path, duration = AudioService.convert_to_wav_16k_mono(raw_audio_path, processed_wav_path)
         duration_minutes = duration / 60.0
 
-        # Passo 2: Diarização (Separação de locutores)
+        # Passo 2: Diarização 100% Local (Separação de locutores)
         job.status = "diarizing"
         job.progress = 30
-        job.current_step = "Identificando e separando locutores no áudio..."
+        job.current_step = "Identificando e separando locutores (Diarização 100% Local)..."
         logger.info(f"[{job_id}] {job.current_step}")
 
         diarizer = DiarizationService(hf_token=options.hf_token)
@@ -420,7 +429,7 @@ async def pull_ollama_model(payload: dict):
         return {"status": "success", "model": model_name, "detail": res}
     except Exception as e:
         logger.error(f"Erro ao baixar modelo {model_name}: {e}")
-        raise HTTPException(status_code=500, detail=f"Falha ao baixar modelo '{model_name}': {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Falha ao baixar modelo '{model_name}': {str(e)}")
 
 
 @app.get("/api/health")
@@ -438,6 +447,6 @@ async def health_check():
 
 
 # Montar frontend estático
-FRONTEND_DIR = settings.ROOT_DIR / "frontend"
+FRONTEND_DIR = getattr(settings, "FRONTEND_DIR", Path(__file__).resolve().parent.parent / "frontend")
 if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

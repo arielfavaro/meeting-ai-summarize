@@ -19,7 +19,10 @@ WORKDIR /app
 # Instalar dependências Python
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r /app/backend/requirements.txt
+    pip install --no-cache-dir -r /app/backend/requirements.txt && \
+    (echo '/usr/local/lib/python3.10/site-packages/nvidia/cublas/lib' > /etc/ld.so.conf.d/nvidia.conf && \
+     echo '/usr/local/lib/python3.10/site-packages/nvidia/cudnn/lib' >> /etc/ld.so.conf.d/nvidia.conf && \
+     ldconfig || true)
 
 # Copiar código da aplicação
 COPY backend/ /app/backend/

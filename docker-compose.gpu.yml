@@ -6,6 +6,7 @@ services:
     environment:
       - WHISPER_DEVICE=cuda
       - WHISPER_COMPUTE_TYPE=float16
+      - LD_LIBRARY_PATH=/usr/local/lib/python3.10/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.10/site-packages/nvidia/cudnn/lib:/usr/local/cuda/lib64
     deploy:
       resources:
         reservations:

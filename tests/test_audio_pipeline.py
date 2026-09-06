@@ -127,6 +127,31 @@ class TestMeetingPipeline(unittest.TestCase):
         deleted = database.get_meeting(self.meeting.id)
         self.assertIsNone(deleted)
 
+    def test_local_diarization(self):
+        """Testa motor de diarização 100% local e offline com áudio sintético."""
+        import numpy as np
+        import soundfile as sf
+        from backend.services.diarization import DiarizationService
+
+        sr = 16000
+        t = np.linspace(0, 4, sr * 4)
+        y1 = 0.8 * np.sin(2 * np.pi * 150 * t[:sr*2])
+        y2 = 0.8 * np.sin(2 * np.pi * 500 * t[sr*2:])
+        y = np.concatenate([y1, y2])
+        test_wav = ROOT_DIR / "data" / "test_diar_synth.wav"
+        sf.write(str(test_wav), y, sr)
+
+        try:
+            diarizer = DiarizationService()
+            results = diarizer.diarize(test_wav)
+            self.assertIsInstance(results, list)
+            self.assertGreater(len(results), 0)
+            self.assertIn("speaker", results[0])
+            self.assertTrue(results[0]["speaker"].startswith("Locutor"))
+        finally:
+            if test_wav.exists():
+                test_wav.unlink()
+
 
 if __name__ == "__main__":
     unittest.main()

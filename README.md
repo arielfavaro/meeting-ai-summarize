@@ -6,13 +6,14 @@
 
 ## ✨ Principais Funcionalidades
 
-- **🎧 Entrada Flexível de Áudio e Vídeo:**
+- **🎧 Entrada Flexível e Mesclagem Multifaixa:**
   - Envie gravações prévias em múltiplos formatos (`MP3`, `WAV`, `M4A`, `OGG`, `MP4`, `WEBM`).
+  - **Suporte Nativo a Áudio Multifaixa (OBS / Zoom / Meet):** Se o vídeo/áudio contiver faixas separadas (ex: microfone e som do sistema em faixas distintas), mescla todas automaticamente com o filtro `amix`, evitando áudios mudos.
   - **Grave ao vivo pelo navegador** com microfone integrado e visualização em tempo real das ondas sonoras.
-- **👥 Separação de Interlocutores (Diarização):**
+- **👥 Separação de Interlocutores (Diarização 100% Local e Offline):**
   - Identifica automaticamente quem está falando em cada trecho (`Locutor 1`, `Locutor 2`, etc.).
-  - Suporte ao modelo oficial **Pyannote.audio 3.1** (com token gratuito HuggingFace).
-  - **Diarizador Fallback Nativo:** se você não configurar token do HuggingFace, o sistema utiliza agrupamento acústico próprio e não falha.
+  - **Motor Nativo 100% Local:** Análise de biometria vocal acústica de alta precisão (MFCCs de 20 coeficientes, contraste espectral multibanda, VAD adaptativo e agrupamento hierárquico por similaridade de cosseno com seleção dinâmica por Silhouette Score).
+  - **Totalmente Independente:** Não exige internet, cadastros, contas ou tokens externos de API.
   - **Renomeação de Oradores:** edite os nomes na interface (ex: `Locutor 1` ➔ `Carlos`, `Locutor 2` ➔ `Dra. Mariana`) e regere a ata com um clique.
 - **⚡ Transcrição Otimizada em Português (Faster-Whisper):**
   - Utiliza CTranslate2 para transcrição até 4x mais veloz que o Whisper tradicional com baixo consumo de memória.
@@ -55,9 +56,9 @@ meeting-ai-summarize/
 │   ├── database.py              # Armazenamento SQLite local
 │   ├── models/schemas.py        # Validação com Pydantic
 │   └── services/
-│       ├── audio_service.py     # Conversão 16kHz mono com FFmpeg
-│       ├── transcription.py     # Faster-Whisper (PT-BR)
-│       ├── diarization.py       # Pyannote + Fallback acústico VAD
+│       ├── audio_service.py     # Conversão 16kHz mono com FFmpeg e amix multifaixa
+│       ├── transcription.py     # Faster-Whisper 100% offline (PT-BR)
+│       ├── diarization.py       # Motor de Diarização 100% Local (VAD + Biometria)
 │       ├── alignment.py         # Fusão fala x orador
 │       ├── summarizer.py        # Prompt engineering para Atas no Ollama
 │       └── exporter.py          # Gerador DOCX, Markdown e TXT
@@ -107,24 +108,24 @@ A interface web estará disponível imediatamente em:
 
 ---
 
-### 2. Baixar o Modelo do Ollama (LLM Local)
+### 2. Baixar / Gerenciar Modelos do Ollama (LLM Local)
 
-No primeiro uso, baixe o modelo de linguagem recomendado (leve e excelente em português):
+O sistema vem configurado por padrão com o **Gemma 4 (12B)**, modelo de última geração com alta inteligência executiva em português e 128k de contexto.
+
+Você pode baixar e alternar modelos diretamente pela aba **⚙️ Ajustes** da interface web, ou pelo terminal:
 
 ```bash
-docker compose exec ollama ollama pull llama3.2:3b
+# Modelo Padrão Ativo (Gemma 4 12B)
+docker compose exec ollama ollama pull gemma4:12b
+
+# Outras excelentes opções em português:
+docker compose exec ollama ollama pull qwen2.5:14b   # Alta precisão em matriz de tarefas
+docker compose exec ollama ollama pull gemma2:27b    # Topo de linha com síntese executiva profunda
+docker compose exec ollama ollama pull llama3.1:8b    # Equilibrado e rápido
+docker compose exec ollama ollama pull llama3.2:3b    # Leve para testes rápidos
 ```
 
-Outras excelentes opções em português:
-```bash
-# Alta precisão de escrita e raciocínio (7B)
-docker compose exec ollama ollama pull qwen2.5:7b
-
-# Modelo Mistral para reuniões de negócios
-docker compose exec ollama ollama pull mistral:7b
-```
-
-*(O modelo fica salvo permanentemente no volume do Docker `ollama_models`).*
+*(Todos os modelos ficam salvos permanentemente no seu disco local no diretório persistente `./data/ollama`).*
 
 ---
 
@@ -133,9 +134,12 @@ docker compose exec ollama ollama pull mistral:7b
 Se sua máquina possui uma GPU NVIDIA com drivers e o [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) instalados, inicie com o override:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build -d
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 ```
-Isso habilitará execução com `WHISPER_DEVICE=cuda` e computação em ponto flutuante `float16`.
+Isso habilitará:
+* **Faster-Whisper:** Execução com `WHISPER_DEVICE=cuda` e precisão de ponto flutuante `float16` nos núcleos Tensor da GPU.
+* **Ollama:** Aceleração GPU completa alocando as camadas do modelo na VRAM da placa.
+* **Diarização e FFmpeg:** Executam na CPU com algoritmos vetorizados rápidos em C, preservando a VRAM para evitar erros de falta de memória (*OOM*).
 
 ---
 
@@ -150,28 +154,19 @@ Assim o container se comunicará diretamente com o Ollama da sua máquina.
 
 ---
 
-## 🔑 Configurar Pyannote Oficial (Opcional)
+## 🎙️ Diarização 100% Local & Offline
+O MeetingAI possui um motor nativo de **Diarização Acústica Multimodal** que roda inteiramente no seu computador (CPU ou GPU). Não é necessário criar conta no Hugging Face, configurar tokens nem conectar à internet para ter separação de oradores com alta precisão.
 
-Por padrão, o MeetingAI já traz um **Diarizador Fallback Acústico** que agrupa as vozes sem precisar de nenhuma chave.
-
-Caso queira a precisão do Pyannote 3.1 oficial:
-1. Crie uma conta gratuita no [Hugging Face](https://huggingface.co).
-2. Aceite os termos do modelo: [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1).
-3. Crie um token de leitura em: [Configurações de Tokens](https://huggingface.co/settings/tokens).
-4. Insira seu token no arquivo `.env`:
-   ```env
-   HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   ```
-   ou preencha na aba **Ajustes** da interface web.
+*(Opcional / Legado)*: Caso você queira expressamente utilizar pipelines de terceiros que exijam token do Hugging Face, é possível passar a variável `HF_TOKEN` no `.env` e ativar `ENABLE_PYANNOTE=true`.
 
 ---
 
 ## 🧪 Verificação e Testes
 
-Para validar a integridade de todos os componentes do pipeline (banco, alinhamento, exportações e sumarizador):
+Para validar a integridade de todos os componentes do pipeline (banco, alinhamento, diarização local, exportações e sumarizador):
 
 ```bash
-docker compose exec app python -m unittest tests/test_audio_pipeline.py
+docker compose exec app python -m unittest discover tests
 ```
 
 ---

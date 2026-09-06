@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 from backend.config import settings
 
@@ -8,6 +8,21 @@ logger = logging.getLogger(__name__)
 
 
 class DiarizationService:
+    """
+    Motor de Diarização (Separação de Oradores) 100% Local e Offline.
+    
+    Funciona inteiramente na máquina local sem necessidade de conexão com a internet,
+    tokens de API ou contas externas (HuggingFace).
+    
+    Etapas do Pipeline Local:
+    1. VAD Adaptativo: Detecção inteligente de trechos de fala com fusão de pausas e sub-janelamento.
+    2. Biometria Acústica: Extração de vetores de timbre vocal (MFCCs 20 coeficientes, deltas,
+       contraste espectral multibanda, centróide/rolloff e zero-crossing rate).
+    3. Clustering Aglomerativo: Agrupamento hierárquico por distância cosseno com seleção
+       automática do número ótimo de oradores via Silhouette Score ou parâmetros manuais.
+    4. Suavização Temporal: Consolidação de fatias e eliminação de ruídos transitórios.
+    """
+
     def __init__(self, hf_token: Optional[str] = None):
         self.hf_token = hf_token or settings.HF_TOKEN
 
@@ -18,20 +33,283 @@ class DiarizationService:
         max_speakers: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
-        Executa separação de oradores (Diarização).
-        Tenta primeiro Pyannote.audio (se houver token HF).
-        Caso contrário ou se falhar, utiliza o Diarizador Fallback baseado em clustering acústico/VAD.
+        Executa separação de oradores (Diarização) 100% local e offline.
         """
-        if self.hf_token and settings.ENABLE_PYANNOTE:
+        # Se o usuário configurar explicitamente Pyannote e houver token válido, tenta pyannote
+        if settings.ENABLE_PYANNOTE and self.hf_token:
             try:
-                logger.info("Iniciando Diarização com Pyannote.audio...")
+                logger.info("Tentando diarização com Pyannote...")
                 return self._diarize_pyannote(audio_path, min_speakers, max_speakers)
             except Exception as e:
-                logger.warning(f"Pyannote.audio falhou ({e}). Ativando fallback acústico...")
-                return self._diarize_fallback(audio_path, min_speakers, max_speakers)
-        else:
-            logger.info("Token HuggingFace não fornecido. Usando Diarizador Fallback (VAD + Clustering acústico)...")
-            return self._diarize_fallback(audio_path, min_speakers, max_speakers)
+                logger.warning(f"Pyannote indisponível ({e}). Executando motor de Diarização 100% Local...")
+                return self._diarize_local(audio_path, min_speakers, max_speakers)
+
+        logger.info("Executando Diarização 100% Local (VAD + Biometria Acústica + Agrupamento Hierárquico)...")
+        return self._diarize_local(audio_path, min_speakers, max_speakers)
+
+    def _diarize_local(
+        self,
+        audio_path: Path,
+        min_speakers: Optional[int] = None,
+        max_speakers: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Diarizador nativo 100% offline de alta fidelidade:
+        - Carrega áudio 16kHz mono.
+        - Segmenta atividade de voz com janelamento dinâmico.
+        - Extrai assinaturas vocais (MFCCs + Contraste Espectral + Dinâmica).
+        - Executa clustering por similaridade de cosseno.
+        """
+        try:
+            import librosa
+            from sklearn.cluster import AgglomerativeClustering
+            from sklearn.metrics import silhouette_score
+
+            y, sr = librosa.load(str(audio_path), sr=16000, mono=True)
+            duration = len(y) / sr
+
+            if duration < 1.0:
+                return [{"start": 0.0, "end": round(duration, 2), "speaker": "Locutor 1"}]
+
+            # 1. Detecção e fatiamento de fala
+            segments = self._detect_speech_segments(y, sr)
+            if not segments:
+                return [{"start": 0.0, "end": round(duration, 2), "speaker": "Locutor 1"}]
+
+            # 2. Extração de características acústicas
+            features = []
+            valid_segments = []
+
+            for start_sec, end_sec in segments:
+                start_idx = int(start_sec * sr)
+                end_idx = int(end_sec * sr)
+                chunk = y[start_idx:end_idx]
+
+                feat = self._extract_vocal_features(chunk, sr)
+                if feat is not None:
+                    features.append(feat)
+                    valid_segments.append((start_sec, end_sec))
+
+            if len(features) <= 1:
+                return [
+                    {"start": round(s[0], 2), "end": round(s[1], 2), "speaker": "Locutor 1"}
+                    for s in (valid_segments or [(0.0, duration)])
+                ]
+
+            features_arr = np.array(features)
+            n_samples = len(features_arr)
+
+            # 3. Determinação do número de interlocutores
+            k = self._determine_k(
+                features=features_arr,
+                n_samples=n_samples,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers
+            )
+
+            # 4. Clustering hierárquico aglomerativo
+            if k <= 1:
+                labels = [0] * n_samples
+            else:
+                clusterer = AgglomerativeClustering(
+                    n_clusters=k,
+                    metric="cosine",
+                    linkage="average"
+                )
+                labels = clusterer.fit_predict(features_arr)
+
+            # 5. Mapeamento cronológico dos locutores
+            speaker_map = {}
+            counter = 1
+            raw_diarized = []
+
+            for (start_sec, end_sec), cluster_id in zip(valid_segments, labels):
+                if cluster_id not in speaker_map:
+                    speaker_map[cluster_id] = f"Locutor {counter}"
+                    counter += 1
+                raw_diarized.append({
+                    "start": round(start_sec, 2),
+                    "end": round(end_sec, 2),
+                    "speaker": speaker_map[cluster_id]
+                })
+
+            # 6. Suavização temporal e fusão de fatias contíguas
+            smoothed = self._smooth_segments(raw_diarized)
+            logger.info(f"Diarização Local concluída: {len(speaker_map)} locutores identificados em {len(smoothed)} segmentos.")
+            return smoothed
+
+        except Exception as e:
+            logger.error(f"Erro na execução da Diarização Local: {e}", exc_info=True)
+            import soundfile as sf
+            try:
+                info = sf.info(str(audio_path))
+                dur = info.duration
+            except Exception:
+                dur = 60.0
+            return [{"start": 0.0, "end": round(dur, 2), "speaker": "Locutor 1"}]
+
+    def _detect_speech_segments(self, y: np.ndarray, sr: int) -> List[Tuple[float, float]]:
+        """Detecta intervalos de voz com VAD por energia e particiona trechos longos."""
+        import librosa
+
+        # Limiar de decibéis adaptativo
+        intervals = librosa.effects.split(y, top_db=28, frame_length=2048, hop_length=512)
+        if len(intervals) == 0:
+            intervals = librosa.effects.split(y, top_db=20, frame_length=2048, hop_length=512)
+        if len(intervals) == 0:
+            return [(0.0, len(y) / sr)]
+
+        # Mesclar pausas curtas (< 0.5s) e descartar trechos imperceptíveis (< 0.35s)
+        merge_gap = int(0.5 * sr)
+        min_len = int(0.35 * sr)
+        merged = []
+
+        curr_start, curr_end = intervals[0]
+        for start, end in intervals[1:]:
+            if start - curr_end < merge_gap:
+                curr_end = end
+            else:
+                if curr_end - curr_start >= min_len:
+                    merged.append((curr_start, curr_end))
+                curr_start, curr_end = start, end
+        if curr_end - curr_start >= min_len:
+            merged.append((curr_start, curr_end))
+
+        if not merged:
+            merged = [(0, len(y))]
+
+        # Sub-janelamento para turnos longos de fala (> 3.5s)
+        # Permite identificar trocas de interlocutores sem pausas longas
+        window_samples = int(2.5 * sr)
+        hop_samples = int(1.25 * sr)
+        slices = []
+
+        for start, end in merged:
+            length = end - start
+            if length <= window_samples:
+                slices.append((start / sr, end / sr))
+            else:
+                sub_start = start
+                while sub_start + min_len < end:
+                    sub_end = min(sub_start + window_samples, end)
+                    slices.append((sub_start / sr, sub_end / sr))
+                    if sub_end == end:
+                        break
+                    sub_start += hop_samples
+
+        return slices
+
+    def _extract_vocal_features(self, chunk: np.ndarray, sr: int) -> Optional[np.ndarray]:
+        """Extrai vetor acústico multimodal para identificar a assinatura do orador."""
+        import librosa
+
+        if len(chunk) < int(0.25 * sr):
+            return None
+        try:
+            # 1. MFCC (20 coeficientes cepstrais + delta)
+            mfcc = librosa.feature.mfcc(y=chunk, sr=sr, n_mfcc=20)
+            mfcc_mean = np.mean(mfcc, axis=1)
+            mfcc_std = np.std(mfcc, axis=1)
+
+            mfcc_delta = librosa.feature.delta(mfcc)
+            delta_mean = np.mean(mfcc_delta, axis=1)
+
+            # 2. Contraste Espectral (6 bandas) - captura ressonâncias e formantes vocais
+            contrast = librosa.feature.spectral_contrast(y=chunk, sr=sr, n_bands=6)
+            contrast_mean = np.mean(contrast, axis=1)
+
+            # 3. Centróide e Rolloff (brilho e frequência de corte vocal)
+            centroid = librosa.feature.spectral_centroid(y=chunk, sr=sr)
+            rolloff = librosa.feature.spectral_rolloff(y=chunk, sr=sr)
+            spec_stats = np.array([
+                np.mean(centroid), np.std(centroid),
+                np.mean(rolloff), np.std(rolloff)
+            ])
+
+            # 4. Zero-Crossing Rate (taxa de cruzamento por zero)
+            zcr = librosa.feature.zero_crossing_rate(chunk)
+            zcr_stats = np.array([np.mean(zcr), np.std(zcr)])
+
+            # Concatena vetor e aplica normalização L2
+            feat = np.hstack([
+                mfcc_mean, mfcc_std, delta_mean,
+                contrast_mean, spec_stats, zcr_stats
+            ])
+            feat = np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)
+            norm = np.linalg.norm(feat)
+            if norm > 1e-9:
+                feat = feat / norm
+            return feat
+        except Exception:
+            return None
+
+    def _determine_k(
+        self,
+        features: np.ndarray,
+        n_samples: int,
+        min_speakers: Optional[int],
+        max_speakers: Optional[int]
+    ) -> int:
+        """Determina o número ótimo de locutores via Silhouette Score ou limites fornecidos."""
+        from sklearn.cluster import AgglomerativeClustering
+        from sklearn.metrics import silhouette_score
+
+        if min_speakers and max_speakers and min_speakers == max_speakers:
+            return min(min_speakers, n_samples)
+        if min_speakers and not max_speakers:
+            return min(min_speakers, n_samples)
+        if max_speakers and not min_speakers and max_speakers == 1:
+            return 1
+
+        max_k_possible = min(6, n_samples - 1)
+        if max_speakers:
+            max_k_possible = min(max_speakers, max_k_possible)
+        min_k_possible = max(2, min_speakers or 2)
+
+        if max_k_possible < min_k_possible:
+            return min(min_k_possible, n_samples)
+        if max_k_possible == min_k_possible:
+            return min_k_possible
+
+        best_k = min_k_possible
+        best_score = -2.0
+
+        for candidate_k in range(min_k_possible, max_k_possible + 1):
+            try:
+                clusterer = AgglomerativeClustering(
+                    n_clusters=candidate_k,
+                    metric="cosine",
+                    linkage="average"
+                )
+                pred_labels = clusterer.fit_predict(features)
+                if len(set(pred_labels)) > 1:
+                    score = silhouette_score(features, pred_labels, metric="cosine")
+                    if score > best_score:
+                        best_score = score
+                        best_k = candidate_k
+            except Exception:
+                pass
+
+        return best_k
+
+    def _smooth_segments(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Funde segmentos adjacentes do mesmo locutor para uma linha do tempo coesa."""
+        if not segments:
+            return []
+
+        smoothed = []
+        for seg in segments:
+            if not smoothed:
+                smoothed.append(dict(seg))
+                continue
+
+            last = smoothed[-1]
+            if last["speaker"] == seg["speaker"] and seg["start"] - last["end"] <= 0.8:
+                last["end"] = max(last["end"], seg["end"])
+            else:
+                smoothed.append(dict(seg))
+
+        return smoothed
 
     def _diarize_pyannote(
         self,
@@ -39,6 +317,7 @@ class DiarizationService:
         min_speakers: Optional[int] = None,
         max_speakers: Optional[int] = None
     ) -> List[Dict[str, Any]]:
+        """Método opcional alternativo para quem tiver pipeline Pyannote configurado."""
         import torch
         from pyannote.audio import Pipeline
 
@@ -79,112 +358,3 @@ class DiarizationService:
             })
 
         return results
-
-    def _diarize_fallback(
-        self,
-        audio_path: Path,
-        min_speakers: Optional[int] = None,
-        max_speakers: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Diarizador Fallback 100% offline:
-        1. Carrega o áudio e detecta intervalos de fala (VAD por energia e silêncio).
-        2. Extrai características acústicas (MFCCs / espectrais) para cada segmento de voz.
-        3. Aplica agrupamento hierárquico (Agglomerative Clustering) para separar as pessoas.
-        """
-        try:
-            import librosa
-            from scipy.cluster.hierarchy import fcluster, linkage
-            from scipy.spatial.distance import pdist
-
-            y, sr = librosa.load(str(audio_path), sr=16000, mono=True)
-            duration = len(y) / sr
-
-            if duration < 1.0:
-                return [{"start": 0.0, "end": duration, "speaker": "Locutor 1"}]
-
-            # Detectar intervalos de fala baseado em energia (top_db=28)
-            intervals = librosa.effects.split(y, top_db=28, frame_length=2048, hop_length=512)
-
-            if len(intervals) == 0:
-                return [{"start": 0.0, "end": round(duration, 2), "speaker": "Locutor 1"}]
-
-            # Fundir intervalos muito próximos (< 0.5s) e descartar muito curtos (< 0.4s)
-            merged_intervals = []
-            min_len = int(0.4 * sr)
-            merge_gap = int(0.5 * sr)
-
-            curr_start, curr_end = intervals[0]
-            for start, end in intervals[1:]:
-                if start - curr_end < merge_gap:
-                    curr_end = end
-                else:
-                    if curr_end - curr_start >= min_len:
-                        merged_intervals.append((curr_start, curr_end))
-                    curr_start, curr_end = start, end
-            if curr_end - curr_start >= min_len:
-                merged_intervals.append((curr_start, curr_end))
-
-            if not merged_intervals:
-                merged_intervals = [(0, len(y))]
-
-            # Extrair features de cada segmento de fala
-            features = []
-            valid_segments = []
-
-            for start, end in merged_intervals:
-                chunk = y[start:end]
-                if len(chunk) < int(0.3 * sr):
-                    continue
-                # MFCC (13 coeficientes) com média e desvio padrão
-                mfcc = librosa.feature.mfcc(y=chunk, sr=sr, n_mfcc=13)
-                feat = np.hstack([np.mean(mfcc, axis=1), np.std(mfcc, axis=1)])
-                # Normalizar vetor
-                norm = np.linalg.norm(feat)
-                if norm > 0:
-                    feat = feat / norm
-                features.append(feat)
-                valid_segments.append((start / sr, end / sr))
-
-            if len(features) <= 1:
-                return [{"start": round(s[0], 2), "end": round(s[1], 2), "speaker": "Locutor 1"} for s in valid_segments] or [{"start": 0.0, "end": round(duration, 2), "speaker": "Locutor 1"}]
-
-            features = np.array(features)
-
-            # Estimar número de clusters (interlocutores)
-            n_samples = len(features)
-            n_clusters = 2
-            if max_speakers:
-                n_clusters = min(max_speakers, max(1, n_samples))
-            elif min_speakers:
-                n_clusters = max(min_speakers, 1)
-            else:
-                # Heurística automática: entre 2 e 4 interlocutores dependendo da variação
-                n_clusters = 2 if n_samples < 8 else (3 if n_samples < 25 else 4)
-
-            # Agrupamento hierárquico por distância cosseno
-            dists = pdist(features, metric="cosine")
-            # Tratar possíveis NaNs
-            dists = np.nan_to_num(dists, nan=0.0)
-            Z = linkage(dists, method="average")
-            labels = fcluster(Z, t=n_clusters, criterion="maxclust")
-
-            results = []
-            for (start_sec, end_sec), cluster_id in zip(valid_segments, labels):
-                results.append({
-                    "start": round(start_sec, 2),
-                    "end": round(end_sec, 2),
-                    "speaker": f"Locutor {cluster_id}"
-                })
-
-            return results
-
-        except Exception as e:
-            logger.error(f"Erro no diarizador fallback: {e}")
-            import soundfile as sf
-            try:
-                info = sf.info(str(audio_path))
-                dur = info.duration
-            except Exception:
-                dur = 60.0
-            return [{"start": 0.0, "end": round(dur, 2), "speaker": "Locutor 1"}]

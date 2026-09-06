@@ -70,13 +70,37 @@ class SummarizerService:
     @classmethod
     async def pull_model(cls, model_name: str):
         """Dispara download de um modelo no Ollama."""
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            resp = await client.post(
+        async with httpx.AsyncClient(timeout=3600.0) as client:
+            async with client.stream(
+                "POST",
                 f"{settings.OLLAMA_BASE_URL}/api/pull",
-                json={"name": model_name, "stream": False}
-            )
-            resp.raise_for_status()
-            return resp.json()
+                json={"model": model_name, "name": model_name, "stream": True}
+            ) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    try:
+                        err_json = json.loads(body.decode("utf-8"))
+                        err_msg = err_json.get("error") or body.decode("utf-8")
+                    except Exception:
+                        err_msg = body.decode("utf-8")
+                    raise Exception(f"Ollama retornou status {resp.status_code}: {err_msg}")
+
+                last_status = "Download em andamento..."
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        if "error" in data:
+                            raise Exception(data["error"])
+                        if "status" in data:
+                            last_status = data["status"]
+                            if "completed" in data and "total" in data and data["total"] > 0:
+                                pct = (data["completed"] / data["total"]) * 100
+                                logger.info(f"Ollama pull {model_name}: {last_status} ({pct:.1f}%)")
+                    except json.JSONDecodeError:
+                        pass
+                return {"status": "success", "detail": last_status}
 
     @classmethod
     async def _generate_with_ollama(
@@ -125,26 +149,53 @@ class SummarizerService:
         if custom_prompt:
             user_content += f"\n\nINSTRUÇÕES ADICIONAIS DO USUÁRIO:\n{custom_prompt}"
 
-        prompt = f"<|im_start|>system\n{system_instruction}<|im_end|>\n<|im_start|>user\n{user_content}<|im_end|>\n<|im_start|>assistant\n"
+        messages = [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": user_content}
+        ]
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            resp = await client.post(
-                f"{settings.OLLAMA_BASE_URL}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": {
-                        "temperature": 0.3,
-                        "top_p": 0.9,
-                        "num_ctx": 16384
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            raw_response = ""
+            try:
+                # 1. Chamada via /api/chat: o Ollama aplica automaticamente o template nativo correto (Gemma, Llama, Qwen)
+                resp = await client.post(
+                    f"{settings.OLLAMA_BASE_URL}/api/chat",
+                    json={
+                        "model": model,
+                        "messages": messages,
+                        "stream": False,
+                        "format": "json",
+                        "options": {
+                            "temperature": 0.3,
+                            "top_p": 0.9,
+                            "num_ctx": 16384
+                        }
                     }
-                }
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            raw_response = data.get("response", "").strip()
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                raw_response = data.get("message", {}).get("content", "").strip()
+            except Exception as e_chat:
+                logger.warning(f"Chamada via /api/chat falhou ({e_chat}). Tentando fallback via /api/generate...")
+                # Fallback para /api/generate caso o endpoint /api/chat não responda
+                resp = await client.post(
+                    f"{settings.OLLAMA_BASE_URL}/api/generate",
+                    json={
+                        "model": model,
+                        "system": system_instruction,
+                        "prompt": user_content,
+                        "stream": False,
+                        "format": "json",
+                        "options": {
+                            "temperature": 0.3,
+                            "top_p": 0.9,
+                            "num_ctx": 16384
+                        }
+                    }
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                raw_response = data.get("response", "").strip()
 
             # Parser seguro de JSON
             parsed = cls._parse_llm_json(raw_response)

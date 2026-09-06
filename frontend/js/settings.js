@@ -58,12 +58,14 @@ class SettingsManager {
       return;
     }
 
+    let selectedAny = false;
     models.forEach((m) => {
       const opt = document.createElement("option");
       opt.value = m;
       opt.textContent = m;
-      if (m.includes("llama3") || m.includes("qwen") || m.includes("mistral")) {
+      if (!selectedAny && (m.includes("gemma4") || m.includes("gemma") || m.includes("qwen") || m.includes("llama"))) {
         opt.selected = true;
+        selectedAny = true;
       }
       this.ollamaModelSelect.appendChild(opt);
     });

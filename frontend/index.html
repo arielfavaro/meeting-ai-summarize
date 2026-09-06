@@ -147,11 +147,11 @@
           <div class="form-group">
             <label class="form-label" for="select-whisper-model">Modelo de Transcrição (Whisper)</label>
             <select id="select-whisper-model" class="form-select">
-              <option value="small" selected>Small (Recomendado • Rápido e Preciso)</option>
+              <option value="medium" selected>Medium (Recomendado • Alta Fidelidade em PT-BR)</option>
+              <option value="large-v3">Large-v3 (Precisão Máxima de Estúdio)</option>
+              <option value="small">Small (Rápido e Leve)</option>
+              <option value="base">Base (Econômico)</option>
               <option value="tiny">Tiny (Ultrarrápido • Testes)</option>
-              <option value="base">Base (Leve)</option>
-              <option value="medium">Medium (Alta Precisão)</option>
-              <option value="large-v3">Large-v3 (Precisão Máxima)</option>
             </select>
           </div>
 
@@ -201,7 +201,7 @@
           </div>
           <div class="step-item" id="step-2">
             <div class="step-icon">2</div>
-            <div class="step-label">Separar Vozes</div>
+            <div class="step-label">Vozes (Local)</div>
           </div>
           <div class="step-item" id="step-3">
             <div class="step-icon">3</div>
@@ -419,47 +419,109 @@
     <section id="tab-settings" class="tab-panel">
       <div class="card" style="max-width: 800px; margin: 0 auto 1.5rem auto;">
         <h2 class="card-title">⬇️ Modelos Recomendados para Baixar no Ollama</h2>
-        <p class="card-desc">Baixe modelos diretamente pela interface sem precisar abrir o terminal.</p>
+        <p class="card-desc">
+          Seu hardware aguenta modelos de grande porte. Modelos de 14B a 27B entregam um nível de sofisticação, raciocínio e redação executiva infinitamente superior.
+        </p>
         
         <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-top: 1rem;">
+          <!-- Gemma 4 12B (Destaque Principal) -->
+          <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(16, 185, 129, 0.08); padding: 0.85rem 1rem; border-radius: var(--radius-md); border: 1px solid rgba(16, 185, 129, 0.25);">
+            <div>
+              <strong style="color: #34d399;">🌟 Gemma 4 (12B)</strong>
+              <span class="meta-pill" style="margin-left: 0.5rem; font-size: 0.7rem; color: #6ee7b7;">Modelo Padrão Ativo</span>
+              <div style="font-size: 0.8rem; color: var(--text-secondary);">
+                Arquitetura de última geração: 128k de contexto, velocidade incrível e alta inteligência em PT-BR (~8.0 GB).
+              </div>
+            </div>
+            <button class="btn btn-primary btn-sm" id="btn-pull-gemma4" onclick="settingsManager.pullModel('gemma4:12b', this)">
+              ⬇️ Baixar (12B)
+            </button>
+          </div>
+
+          <!-- 27B / 32B -->
+          <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(59, 130, 246, 0.08); padding: 0.85rem 1rem; border-radius: var(--radius-md); border: 1px solid rgba(59, 130, 246, 0.25);">
+            <div>
+              <strong style="color: #60a5fa;">👑 Gemma 2 (27B)</strong>
+              <span class="meta-pill" style="margin-left: 0.5rem; font-size: 0.7rem; color: #93c5fd;">Topo de Linha Google</span>
+              <div style="font-size: 0.8rem; color: var(--text-secondary);">
+                Raciocínio corporativo profundo, vocabulário refinado e síntese executiva impecável em PT-BR (~16 GB).
+              </div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btn-pull-gemma27" onclick="settingsManager.pullModel('gemma2:27b', this)">
+              ⬇️ Baixar (27B)
+            </button>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(139, 92, 246, 0.08); padding: 0.85rem 1rem; border-radius: var(--radius-md); border: 1px solid rgba(139, 92, 246, 0.25);">
+            <div>
+              <strong style="color: #a78bfa;">⚡ Qwen 2.5 (14B)</strong>
+              <span class="meta-pill" style="margin-left: 0.5rem; font-size: 0.7rem; color: #c4b5fd;">Mais Equilibrado</span>
+              <div style="font-size: 0.8rem; color: var(--text-secondary);">
+                Melhor custo/benefício do mundo open-source: estruturação de tarefas e decisões sem falhas (~9.0 GB).
+              </div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btn-pull-qwen14" onclick="settingsManager.pullModel('qwen2.5:14b', this)">
+              ⬇️ Baixar (14B)
+            </button>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 255, 255, 0.03); padding: 0.75rem 1rem; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+            <div>
+              <strong>🚀 Qwen 2.5 (32B)</strong>
+              <div style="font-size: 0.8rem; color: var(--text-secondary);">
+                Para quem quer precisão máxima e contexto gigante para atas extensas (~19 GB).
+              </div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btn-pull-qwen32" onclick="settingsManager.pullModel('qwen2.5:32b', this)">
+              ⬇️ Baixar (32B)
+            </button>
+          </div>
+
+          <!-- 8B -->
+          <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 255, 255, 0.03); padding: 0.75rem 1rem; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+            <div>
+              <strong>Llama 3.1 (8B)</strong>
+              <div style="font-size: 0.8rem; color: var(--text-secondary);">
+                Padrão clássico da Meta, muito equilibrado e rápido (~4.9 GB).
+              </div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btn-pull-llama8" onclick="settingsManager.pullModel('llama3.1:8b', this)">
+              ⬇️ Baixar (8B)
+            </button>
+          </div>
+
+          <!-- 3B -->
           <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 255, 255, 0.03); padding: 0.75rem 1rem; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
             <div>
               <strong>Llama 3.2 (3B)</strong>
-              <div style="font-size: 0.8rem; color: var(--text-secondary);">Recomendado • Muito rápido, leve e excelente redação em PT-BR (~2.0 GB)</div>
+              <div style="font-size: 0.8rem; color: var(--text-secondary);">
+                Opção leve para testes instantâneos (~2.0 GB).
+              </div>
             </div>
             <button class="btn btn-secondary btn-sm" id="btn-pull-llama3" onclick="settingsManager.pullModel('llama3.2:3b', this)">
-              ⬇️ Baixar Modelo
+              ⬇️ Baixar (3B)
             </button>
           </div>
 
-          <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 255, 255, 0.03); padding: 0.75rem 1rem; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
-            <div>
-              <strong>Qwen 2.5 (7B)</strong>
-              <div style="font-size: 0.8rem; color: var(--text-secondary);">Máxima Qualidade • Síntese corporativa profunda e estruturação impecável (~4.7 GB)</div>
+          <!-- Campo para Modelo Customizado -->
+          <div style="margin-top: 0.5rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+            <label class="form-label" for="input-custom-model-pull">Baixar Qualquer Outro Modelo do Ollama</label>
+            <div style="display: flex; gap: 0.5rem;">
+              <input type="text" id="input-custom-model-pull" class="form-input" placeholder="Ex: gemma2:27b, qwen2.5:14b, deepseek-r1:14b, command-r:35b">
+              <button class="btn btn-secondary" onclick="const name = document.getElementById('input-custom-model-pull').value.trim(); if (name) settingsManager.pullModel(name, this);">
+                Baixar
+              </button>
             </div>
-            <button class="btn btn-secondary btn-sm" id="btn-pull-qwen" onclick="settingsManager.pullModel('qwen2.5:7b', this)">
-              ⬇️ Baixar Modelo
-            </button>
-          </div>
-
-          <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 255, 255, 0.03); padding: 0.75rem 1rem; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
-            <div>
-              <strong>Mistral (7B)</strong>
-              <div style="font-size: 0.8rem; color: var(--text-secondary);">Focado em Negócios • Excelente raciocínio lógico e síntese de deliberações (~4.1 GB)</div>
-            </div>
-            <button class="btn btn-secondary btn-sm" id="btn-pull-mistral" onclick="settingsManager.pullModel('mistral:7b', this)">
-              ⬇️ Baixar Modelo
-            </button>
           </div>
         </div>
       </div>
 
       <div class="card" style="max-width: 800px; margin: 0 auto;">
-        <h2 class="card-title">⚙️ Configurações dos Motores de IA</h2>
-        <p class="card-desc">Ajuste os parâmetros de modelos locais, endereços de rede e tokens.</p>
+        <h2 class="card-title">⚙️ Motores de IA 100% Locais e Privados</h2>
+        <p class="card-desc">Toda a transcrição, separação de oradores e geração de atas rodam diretamente no seu hardware local, sem envio de dados para a nuvem.</p>
 
         <div class="form-group">
-          <label class="form-label" for="setting-ollama-url">URL do Servidor Ollama</label>
+          <label class="form-label" for="setting-ollama-url">URL do Servidor Ollama (LLM Local)</label>
           <div style="display: flex; gap: 0.5rem;">
             <input type="text" id="setting-ollama-url" class="form-input" value="http://localhost:11434" placeholder="http://ollama:11434 ou http://host.docker.internal:11434">
             <button class="btn btn-secondary" onclick="settingsManager.testOllamaConnection()">
@@ -467,20 +529,31 @@
             </button>
           </div>
           <small style="color: var(--text-muted); font-size: 0.78rem;">
-            No Docker Compose padrão, aponte para <code>http://ollama:11434</code> ou <code>http://host.docker.internal:11434</code> caso use o Ollama instalado no seu host.
+            No Docker padrão, aponte para <code>http://ollama:11434</code>. Execução e modelos 100% locais no disco.
           </small>
         </div>
 
-        <div class="form-group">
-          <label class="form-label" for="setting-hf-token">Hugging Face Token (Opcional - Pyannote Diarization 3.1)</label>
-          <input type="password" id="setting-hf-token" class="form-input" placeholder="hf_xxxxxxxxxxxxxxxxxxxx">
-          <small style="color: var(--text-muted); font-size: 0.78rem;">
-            Necessário apenas para usar o modelo oficial do Pyannote. Se deixado em branco, o sistema utilizará o <strong>Diarizador Fallback Acústico</strong> nativo sem quebrar.
-          </small>
+        <div class="form-group" style="background: rgba(16, 185, 129, 0.08); padding: 1rem; border-radius: var(--radius-md); border: 1px solid rgba(16, 185, 129, 0.25);">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.35rem;">
+            <strong style="color: #34d399; font-size: 0.95rem;">🎙️ Diarização 100% Local (Nativa Offline)</strong>
+            <span class="meta-pill" style="color: #6ee7b7; font-size: 0.75rem;">Ativo • Sem Nuvem</span>
+          </div>
+          <p style="font-size: 0.82rem; color: var(--text-secondary); margin: 0;">
+            O sistema identifica e separa múltiplos oradores utilizando análise acústica de biometria vocal (MFCCs de 20 coeficientes, contraste espectral e agrupamento hierárquico). <strong>Não requer internet, nenhuma conta e nenhum token externo.</strong>
+          </p>
+          <details style="margin-top: 0.75rem; font-size: 0.8rem; color: var(--text-muted);">
+            <summary style="cursor: pointer; user-select: none;">Opções Avançadas (Token Hugging Face Opcional)</summary>
+            <div style="margin-top: 0.5rem;">
+              <input type="password" id="setting-hf-token" class="form-input" placeholder="hf_xxxxxxxxxxxxxxxxxxxx">
+              <small style="color: var(--text-muted); font-size: 0.75rem;">
+                Campo opcional apenas para quem deseja utilizar modelos legados do Pyannote. O sistema funciona de forma completa e autônoma sem ele.
+              </small>
+            </div>
+          </details>
         </div>
 
         <div class="form-group">
-          <label class="form-label" for="setting-whisper-device">Dispositivo de Execução do Whisper</label>
+          <label class="form-label" for="setting-whisper-device">Dispositivo de Execução do Faster-Whisper</label>
           <select id="setting-whisper-device" class="form-select">
             <option value="cpu" selected>CPU (Compatível com qualquer máquina)</option>
             <option value="cuda">NVIDIA GPU (CUDA - Requer suporte a GPU no Docker)</option>

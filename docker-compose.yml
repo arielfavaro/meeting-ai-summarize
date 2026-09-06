@@ -11,15 +11,19 @@ services:
     volumes:
       # Bind mount no host: dados, banco SQLite e modelos de áudio ficam na sua máquina física
       - ./data:/app/data
+      - ./backend:/app/backend
+      - ./frontend:/app/frontend
+      - ./tests:/app/tests
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma4:12b}
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-medium}
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
       - DEFAULT_LANGUAGE=${DEFAULT_LANGUAGE:-pt}
       - HF_TOKEN=${HF_TOKEN:-}
-      - ENABLE_PYANNOTE=${ENABLE_PYANNOTE:-true}
+      - ENABLE_PYANNOTE=${ENABLE_PYANNOTE:-false}
+      - HF_HUB_DISABLE_TELEMETRY=1
     depends_on:
       - ollama
     networks:
@@ -27,11 +31,11 @@ services:
 
   # Ollama (LLM Local para Geração da Ata Executiva)
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.33.3
     container_name: meeting-ai-ollama
     restart: unless-stopped
     ports:
-      - "11434:11434"
+      - "11435:11434"
     volumes:
       # Bind mount no host: modelos LLM (Llama, Qwen, Mistral) salvos fora do VHDX do WSL
       - ./data/ollama:/root/.ollama

@@ -47,8 +47,10 @@ echo.
 echo Interface Web disponível em:
 echo 👉 http://localhost:8000
 echo.
-echo Para baixar o modelo de LLM local recomendado (caso ainda não tenha):
-echo   docker compose exec ollama ollama pull llama3.2:3b
+echo Para baixar o modelo de LLM recomendado:
+echo   - Topo de linha (27B): docker compose exec ollama ollama pull gemma2:27b
+echo   - Super estruturado (14B): docker compose exec ollama ollama pull qwen2.5:14b
+echo   - Ou baixe com 1 clique diretamente na aba 'Ajustes' da interface web!
 echo.
 echo Para acompanhar os logs em tempo real:
 echo   docker compose logs -f app
