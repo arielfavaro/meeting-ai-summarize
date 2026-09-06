@@ -152,6 +152,43 @@ class TestMeetingPipeline(unittest.TestCase):
             if test_wav.exists():
                 test_wav.unlink()
 
+    def test_local_diarization_four_speakers(self):
+        """Testa separação de 4 interlocutores distintos com timbres e frequências diferentes."""
+        import numpy as np
+        import soundfile as sf
+        from backend.services.diarization import DiarizationService
+
+        sr = 16000
+        # Cria 4 interlocutores com frequências fundamentais distintas
+        # e múltiplos turnos de fala
+        def make_voice(f0, dur_sec):
+            t = np.linspace(0, dur_sec, int(sr * dur_sec))
+            # fundamental + harmônicos para criar timbre rico
+            sig = 0.6 * np.sin(2 * np.pi * f0 * t) + 0.3 * np.sin(2 * np.pi * 2 * f0 * t)
+            silence = np.zeros(int(sr * 0.4))
+            return np.concatenate([sig, silence])
+
+        chunks = []
+        # Turnos alternados entre os 4 participantes
+        pitches = [120, 220, 320, 420]
+        for _ in range(3):
+            for p in pitches:
+                chunks.append(make_voice(p, 1.2))
+
+        y = np.concatenate(chunks)
+        test_wav = ROOT_DIR / "data" / "test_diar_4spk.wav"
+        sf.write(str(test_wav), y, sr)
+
+        try:
+            diarizer = DiarizationService()
+            # Testar com especificação explícita de 4 participantes
+            results = diarizer.diarize(test_wav, min_speakers=4, max_speakers=4)
+            speakers = set(r["speaker"] for r in results)
+            self.assertEqual(len(speakers), 4, f"Esperado 4 oradores, detectou: {speakers}")
+        finally:
+            if test_wav.exists():
+                test_wav.unlink()
+
 
 if __name__ == "__main__":
     unittest.main()

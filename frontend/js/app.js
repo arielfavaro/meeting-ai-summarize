@@ -140,7 +140,10 @@ class MeetingApp {
       processForm.append("whisper_model", whisperModel);
       processForm.append("language", "pt");
       if (ollamaModel) processForm.append("ollama_model", ollamaModel);
-      if (minSpeakers) processForm.append("min_speakers", minSpeakers);
+      if (minSpeakers) {
+        processForm.append("min_speakers", minSpeakers);
+        processForm.append("max_speakers", minSpeakers);
+      }
       if (customPrompt) processForm.append("custom_prompt", customPrompt);
       if (hfToken) processForm.append("hf_token", hfToken);
 

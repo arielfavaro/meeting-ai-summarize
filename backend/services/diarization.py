@@ -57,13 +57,13 @@ class DiarizationService:
         Diarizador nativo 100% offline de alta fidelidade:
         - Carrega áudio 16kHz mono.
         - Segmenta atividade de voz com janelamento dinâmico.
-        - Extrai assinaturas vocais (MFCCs + Contraste Espectral + Dinâmica).
-        - Executa clustering por similaridade de cosseno.
+        - Extrai assinaturas vocais (MFCCs sem energia 0 + Formantes + Pitch F0 + Dinâmica).
+        - Padroniza distribuição acústica e executa clustering aglomerativo com Ward linkage.
         """
         try:
             import librosa
+            from sklearn.preprocessing import StandardScaler, normalize
             from sklearn.cluster import AgglomerativeClustering
-            from sklearn.metrics import silhouette_score
 
             y, sr = librosa.load(str(audio_path), sr=16000, mono=True)
             duration = len(y) / sr
@@ -96,29 +96,33 @@ class DiarizationService:
                     for s in (valid_segments or [(0.0, duration)])
                 ]
 
-            features_arr = np.array(features)
-            n_samples = len(features_arr)
+            raw_arr = np.array(features)
+            n_samples = len(raw_arr)
 
-            # 3. Determinação do número de interlocutores
+            # 3. Padronização Acústica e Normalização L2
+            scaler = StandardScaler()
+            features_scaled = scaler.fit_transform(raw_arr)
+            features_norm = normalize(features_scaled)
+
+            # 4. Determinação do número de interlocutores
             k = self._determine_k(
-                features=features_arr,
+                features=features_norm,
                 n_samples=n_samples,
                 min_speakers=min_speakers,
                 max_speakers=max_speakers
             )
 
-            # 4. Clustering hierárquico aglomerativo
+            # 5. Clustering hierárquico aglomerativo com Ward linkage
             if k <= 1:
                 labels = [0] * n_samples
             else:
                 clusterer = AgglomerativeClustering(
                     n_clusters=k,
-                    metric="cosine",
-                    linkage="average"
+                    linkage="ward"
                 )
-                labels = clusterer.fit_predict(features_arr)
+                labels = clusterer.fit_predict(features_norm)
 
-            # 5. Mapeamento cronológico dos locutores
+            # 6. Mapeamento cronológico dos locutores
             speaker_map = {}
             counter = 1
             raw_diarized = []
@@ -133,7 +137,7 @@ class DiarizationService:
                     "speaker": speaker_map[cluster_id]
                 })
 
-            # 6. Suavização temporal e fusão de fatias contíguas
+            # 7. Suavização temporal e fusão de fatias contíguas
             smoothed = self._smooth_segments(raw_diarized)
             logger.info(f"Diarização Local concluída: {len(speaker_map)} locutores identificados em {len(smoothed)} segmentos.")
             return smoothed
@@ -206,39 +210,58 @@ class DiarizationService:
         if len(chunk) < int(0.25 * sr):
             return None
         try:
-            # 1. MFCC (20 coeficientes cepstrais + delta)
-            mfcc = librosa.feature.mfcc(y=chunk, sr=sr, n_mfcc=20)
+            # 1. MFCC 1..20 (exclui coeficiente 0 para ser invariante a volume)
+            mfcc = librosa.feature.mfcc(y=chunk, sr=sr, n_mfcc=21)[1:]
             mfcc_mean = np.mean(mfcc, axis=1)
             mfcc_std = np.std(mfcc, axis=1)
 
+            # Deltas temporais dos MFCCs
             mfcc_delta = librosa.feature.delta(mfcc)
             delta_mean = np.mean(mfcc_delta, axis=1)
 
-            # 2. Contraste Espectral (6 bandas) - captura ressonâncias e formantes vocais
+            # 2. Contraste Espectral (6 bandas) - ressonâncias e formantes vocais
             contrast = librosa.feature.spectral_contrast(y=chunk, sr=sr, n_bands=6)
             contrast_mean = np.mean(contrast, axis=1)
+            contrast_std = np.std(contrast, axis=1)
 
-            # 3. Centróide e Rolloff (brilho e frequência de corte vocal)
+            # 3. Centróide, Rolloff, Largura de Banda e Flatness (forma do espectro vocal)
             centroid = librosa.feature.spectral_centroid(y=chunk, sr=sr)
             rolloff = librosa.feature.spectral_rolloff(y=chunk, sr=sr)
+            bandwidth = librosa.feature.spectral_bandwidth(y=chunk, sr=sr)
+            flatness = librosa.feature.spectral_flatness(y=chunk)
             spec_stats = np.array([
                 np.mean(centroid), np.std(centroid),
-                np.mean(rolloff), np.std(rolloff)
+                np.mean(rolloff), np.std(rolloff),
+                np.mean(bandwidth), np.std(bandwidth),
+                np.mean(flatness), np.std(flatness)
             ])
 
-            # 4. Zero-Crossing Rate (taxa de cruzamento por zero)
+            # 4. Zero-Crossing Rate
             zcr = librosa.feature.zero_crossing_rate(chunk)
             zcr_stats = np.array([np.mean(zcr), np.std(zcr)])
 
-            # Concatena vetor e aplica normalização L2
+            # 5. Pitch F0 (frequência fundamental da voz via YIN: 65Hz a 400Hz)
+            try:
+                f0 = librosa.yin(chunk, fmin=65, fmax=400, sr=sr, frame_length=1024, hop_length=256)
+                voiced = f0[(f0 >= 65) & (f0 <= 400)]
+                if len(voiced) > 0:
+                    f0_stats = np.array([
+                        float(np.median(voiced)),
+                        float(np.std(voiced)),
+                        float(len(voiced) / len(f0))
+                    ])
+                else:
+                    f0_stats = np.array([0.0, 0.0, 0.0])
+            except Exception:
+                f0_stats = np.array([0.0, 0.0, 0.0])
+
+            # Concatena vetor multimodal completo
             feat = np.hstack([
                 mfcc_mean, mfcc_std, delta_mean,
-                contrast_mean, spec_stats, zcr_stats
+                contrast_mean, contrast_std,
+                spec_stats, zcr_stats, f0_stats
             ])
             feat = np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)
-            norm = np.linalg.norm(feat)
-            if norm > 1e-9:
-                feat = feat / norm
             return feat
         except Exception:
             return None
@@ -250,18 +273,19 @@ class DiarizationService:
         min_speakers: Optional[int],
         max_speakers: Optional[int]
     ) -> int:
-        """Determina o número ótimo de locutores via Silhouette Score ou limites fornecidos."""
+        """Determina o número ótimo de locutores via Ward clustering, Davies-Bouldin e Silhouette."""
         from sklearn.cluster import AgglomerativeClustering
-        from sklearn.metrics import silhouette_score
+        from sklearn.metrics import silhouette_score, davies_bouldin_score
 
+        # Caso o usuário tenha definido valor fixo de participantes
         if min_speakers and max_speakers and min_speakers == max_speakers:
-            return min(min_speakers, n_samples)
+            return max(1, min(min_speakers, n_samples))
         if min_speakers and not max_speakers:
-            return min(min_speakers, n_samples)
+            return max(1, min(min_speakers, n_samples))
         if max_speakers and not min_speakers and max_speakers == 1:
             return 1
 
-        max_k_possible = min(6, n_samples - 1)
+        max_k_possible = min(8, n_samples - 1)
         if max_speakers:
             max_k_possible = min(max_speakers, max_k_possible)
         min_k_possible = max(2, min_speakers or 2)
@@ -272,23 +296,49 @@ class DiarizationService:
             return min_k_possible
 
         best_k = min_k_possible
-        best_score = -2.0
+        best_score = -999.0
+
+        # Primeira rodada: busca penalizando clusters menores que 2.5% das amostras (outliers)
+        min_cluster_size = max(2, int(0.025 * n_samples))
 
         for candidate_k in range(min_k_possible, max_k_possible + 1):
             try:
                 clusterer = AgglomerativeClustering(
                     n_clusters=candidate_k,
-                    metric="cosine",
-                    linkage="average"
+                    linkage="ward"
                 )
                 pred_labels = clusterer.fit_predict(features)
                 if len(set(pred_labels)) > 1:
-                    score = silhouette_score(features, pred_labels, metric="cosine")
+                    counts = np.bincount(pred_labels)
+                    if np.min(counts) < min_cluster_size:
+                        continue
+                    sil = silhouette_score(features, pred_labels)
+                    db = davies_bouldin_score(features, pred_labels)
+                    score = sil / max(db, 0.001)
                     if score > best_score:
                         best_score = score
                         best_k = candidate_k
             except Exception:
                 pass
+
+        # Se todos foram filtrados pelo tamanho mínimo, avalia sem o filtro de outlier
+        if best_score == -999.0:
+            for candidate_k in range(min_k_possible, max_k_possible + 1):
+                try:
+                    clusterer = AgglomerativeClustering(
+                        n_clusters=candidate_k,
+                        linkage="ward"
+                    )
+                    pred_labels = clusterer.fit_predict(features)
+                    if len(set(pred_labels)) > 1:
+                        sil = silhouette_score(features, pred_labels)
+                        db = davies_bouldin_score(features, pred_labels)
+                        score = sil / max(db, 0.001)
+                        if score > best_score:
+                            best_score = score
+                            best_k = candidate_k
+                except Exception:
+                    pass
 
         return best_k
 
