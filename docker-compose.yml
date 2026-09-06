@@ -9,8 +9,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      # Bind mount no host: dados, banco SQLite e modelos de áudio ficam na sua máquina física
       - ./data:/app/data
-      - whisper_models:/app/data/models_cache
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
@@ -33,16 +33,11 @@ services:
     ports:
       - "11434:11434"
     volumes:
-      - ollama_models:/root/.ollama
+      # Bind mount no host: modelos LLM (Llama, Qwen, Mistral) salvos fora do VHDX do WSL
+      - ./data/ollama:/root/.ollama
     networks:
       - meeting-net
 
 networks:
   meeting-net:
     driver: bridge
-
-volumes:
-  whisper_models:
-    name: meeting_ai_whisper_models
-  ollama_models:
-    name: meeting_ai_ollama_models

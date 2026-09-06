@@ -17,6 +17,8 @@ if [ ! -f ".env" ]; then
     cp .env.example .env
 fi
 
+mkdir -p data/ollama data/models_cache
+
 echo "[INFO] Construindo e subindo containers Docker..."
 docker compose up --build -d
 

@@ -21,6 +21,10 @@ if not exist ".env" (
     copy ".env.example" ".env" > nul
 )
 
+:: Garantir que as pastas de bind mount no host existam
+if not exist "data\ollama" mkdir "data\ollama"
+if not exist "data\models_cache" mkdir "data\models_cache"
+
 echo [INFO] Construindo e iniciando containers Docker...
 echo Isso pode levar alguns minutos no primeiro download de imagens.
 echo.
