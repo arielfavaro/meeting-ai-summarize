@@ -432,14 +432,14 @@ async def export_meeting(meeting_id: str, format: str):
         content = ExporterService.to_markdown(meeting)
         return Response(
             content=content,
-            media_type="text/markdown",
+            media_type="text/markdown; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="{filename_base}.md"'}
         )
     elif format == "txt":
         content = ExporterService.to_plain_text(meeting)
         return Response(
             content=content,
-            media_type="text/plain",
+            media_type="text/plain; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="{filename_base}.txt"'}
         )
     elif format == "docx":
@@ -451,6 +451,55 @@ async def export_meeting(meeting_id: str, format: str):
         )
     else:
         raise HTTPException(status_code=400, detail=f"Formato '{format}' não suportado (use 'md', 'docx' ou 'txt').")
+
+
+@app.get("/api/meetings/{meeting_id}/export-transcript/{format}")
+async def export_meeting_transcript(meeting_id: str, format: str):
+    """Exporta a transcrição da reunião para Markdown (.md), Word (.docx), Texto (.txt) ou Legenda (.srt)."""
+    meeting = database.get_meeting(meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Reunião não encontrada.")
+
+    if not meeting.segments:
+        raise HTTPException(status_code=400, detail="Reunião não possui transcrição disponível.")
+
+    safe_title = "".join(c for c in meeting.title if c.isalnum() or c in (" ", "_", "-")).strip()
+    filename_base = f"Transcricao_{safe_title}_{datetime.now().strftime('%Y%m%d')}"
+
+    if format == "md":
+        content = ExporterService.transcript_to_markdown(meeting)
+        return Response(
+            content=content,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.md"'}
+        )
+    elif format == "txt":
+        content = ExporterService.transcript_to_plain_text(meeting)
+        return Response(
+            content=content,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.txt"'}
+        )
+    elif format == "docx":
+        stream = ExporterService.transcript_to_docx_bytes(meeting)
+        return StreamingResponse(
+            stream,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.docx"'}
+        )
+    elif format == "srt":
+        content = ExporterService.transcript_to_srt(meeting)
+        return Response(
+            content=content,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.srt"'}
+        )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Formato '{format}' não suportado para transcrição (use 'md', 'docx', 'txt' ou 'srt')."
+        )
+
 
 
 # Áudio Estático para Player Interativo

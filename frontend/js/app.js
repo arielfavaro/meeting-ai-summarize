@@ -336,10 +336,29 @@ class MeetingApp {
       }
     }
 
-    // 2. Carregar Player de Áudio
+    // 2. Preencher Metadados da Transcrição
+    const uniqueSpeakers = Array.from(new Set(meeting.segments.map((s) => s.speaker)));
+    const transcriptTitleEl = document.getElementById("transcript-title");
+    if (transcriptTitleEl) {
+      transcriptTitleEl.textContent = meeting.summary ? `Transcrição: ${meeting.summary.title}` : `Transcrição: ${meeting.title}`;
+    }
+    const transcriptDateEl = document.getElementById("transcript-date");
+    if (transcriptDateEl) {
+      transcriptDateEl.textContent = `📅 Data: ${meeting.summary ? meeting.summary.date : (meeting.created_at || "--")}`;
+    }
+    const transcriptDurEl = document.getElementById("transcript-duration");
+    if (transcriptDurEl) {
+      transcriptDurEl.textContent = `⏱️ Duração: ${(meeting.audio_duration / 60).toFixed(1)} min`;
+    }
+    const transcriptPartEl = document.getElementById("transcript-participants");
+    if (transcriptPartEl) {
+      transcriptPartEl.textContent = `👥 Locutores (${uniqueSpeakers.length}): ${uniqueSpeakers.join(", ")}`;
+    }
+
+    // 3. Carregar Player de Áudio
     audioPlayer.loadAudio(meeting.audio_url, meeting.segments);
 
-    // 3. Renderizar Locutores e Transcrição
+    // 4. Renderizar Locutores e Transcrição
     this._renderSpeakerInputs(meeting);
     this._renderTranscriptFeed(meeting.segments);
   }
@@ -449,6 +468,58 @@ class MeetingApp {
     if (!this.currentMeeting) return;
     window.location.href = `/api/meetings/${this.currentMeeting.id}/export/${format}`;
   }
+
+  copyTranscriptText() {
+    if (!this.currentMeeting || !this.currentMeeting.segments || this.currentMeeting.segments.length === 0) {
+      this.showToast("Nenhuma transcrição disponível para copiar.");
+      return;
+    }
+    const lines = this.currentMeeting.segments.map((seg) => {
+      const m = Math.floor(seg.start / 60);
+      const s = Math.floor(seg.start % 60);
+      const timeStr = `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+      return `[${timeStr}] ${seg.speaker}: ${seg.text}`;
+    });
+    navigator.clipboard.writeText(lines.join("\n"));
+    this.showToast("Transcrição copiada para a área de transferência!");
+  }
+
+  exportTranscript(format) {
+    if (!this.currentMeeting || !this.currentMeeting.segments || this.currentMeeting.segments.length === 0) {
+      this.showToast("Nenhuma transcrição disponível para exportar.");
+      return;
+    }
+    window.location.href = `/api/meetings/${this.currentMeeting.id}/export-transcript/${format}`;
+  }
+
+  printMinutes() {
+    if (!this.currentMeeting || !this.currentMeeting.summary) {
+      this.showToast("Ata não disponível para impressão.");
+      return;
+    }
+    document.body.classList.remove("print-transcript-mode");
+    window.print();
+  }
+
+  printTranscript() {
+    if (!this.currentMeeting || !this.currentMeeting.segments || this.currentMeeting.segments.length === 0) {
+      this.showToast("Nenhuma transcrição disponível para impressão.");
+      return;
+    }
+    document.body.classList.add("print-transcript-mode");
+    window.print();
+    window.addEventListener(
+      "afterprint",
+      () => {
+        document.body.classList.remove("print-transcript-mode");
+      },
+      { once: true }
+    );
+    setTimeout(() => {
+      document.body.classList.remove("print-transcript-mode");
+    }, 2000);
+  }
+
 
   async loadMeetingsHistory() {
     try {

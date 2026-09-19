@@ -98,6 +98,29 @@ class TestMeetingPipeline(unittest.TestCase):
         self.assertIsInstance(docx_bytes, io.BytesIO)
         self.assertGreater(docx_bytes.getbuffer().nbytes, 500)
 
+    def test_transcript_exports(self):
+        """Testa exportações específicas da transcrição em MD, TXT, DOCX e SRT."""
+        # Markdown
+        md = ExporterService.transcript_to_markdown(self.meeting)
+        self.assertIn("# Transcrição:", md)
+        self.assertIn("Diálogos Integrais", md)
+        self.assertIn("[00:00] Locutor 1:", md)
+
+        # Plain Text
+        txt = ExporterService.transcript_to_plain_text(self.meeting)
+        self.assertIn("TRANSCRIÇÃO DE REUNIÃO:", txt)
+        self.assertIn("[00:00] Locutor 1:", txt)
+
+        # DOCX
+        docx_stream = ExporterService.transcript_to_docx_bytes(self.meeting)
+        self.assertIsInstance(docx_stream, io.BytesIO)
+        self.assertGreater(docx_stream.getbuffer().nbytes, 500)
+
+        # SRT
+        srt = ExporterService.transcript_to_srt(self.meeting)
+        self.assertIn("1\n00:00:00,000 --> 00:00:04,500\n[Locutor 1]", srt)
+        self.assertIn("2\n00:00:05,000 --> 00:00:09,800\n[Locutor 2]", srt)
+
     def test_fallback_summarizer(self):
         """Testa gerador heurístico em PT-BR para situações sem LLM disponível."""
         summary = SummarizerService._generate_fallback(

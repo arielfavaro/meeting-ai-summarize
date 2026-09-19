@@ -179,3 +179,148 @@ class ExporterService:
         doc.save(target_stream)
         target_stream.seek(0)
         return target_stream
+
+    @staticmethod
+    def _format_srt_time(seconds: float) -> str:
+        """Converte segundos para o formato de tempo do SRT (HH:MM:SS,mmm)."""
+        hrs = int(seconds // 3600)
+        mins = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        millis = int(round((seconds - int(seconds)) * 1000))
+        if millis >= 1000:
+            millis = 999
+        return f"{hrs:02d}:{mins:02d}:{secs:02d},{millis:03d}"
+
+    @staticmethod
+    def transcript_to_markdown(meeting: MeetingDetail) -> str:
+        """Retorna a transcrição dos diálogos em formato Markdown."""
+        title = meeting.summary.title if meeting.summary else meeting.title
+        date_str = meeting.summary.date if meeting.summary else meeting.created_at
+        duration_min = meeting.audio_duration / 60.0
+        unique_speakers = sorted(list(set(seg.speaker for seg in meeting.segments)))
+
+        content = [
+            f"# Transcrição: {title}",
+            "",
+            f"**Data:** {date_str}  ",
+            f"**Duração:** {duration_min:.1f} minutos  ",
+            f"**Locutores:** {', '.join(unique_speakers)}  ",
+            "",
+            "---",
+            "",
+            "## 🎙️ Diálogos Integrais",
+            ""
+        ]
+
+        for seg in meeting.segments:
+            m = int(seg.start // 60)
+            s = int(seg.start % 60)
+            time_str = f"{m:02d}:{s:02d}"
+            content.append(f"**[{time_str}] {seg.speaker}:** {seg.text}  ")
+
+        return "\n".join(content)
+
+    @staticmethod
+    def transcript_to_plain_text(meeting: MeetingDetail) -> str:
+        """Gera versão da transcrição em texto simples (.txt)."""
+        title = meeting.summary.title if meeting.summary else meeting.title
+        date_str = meeting.summary.date if meeting.summary else meeting.created_at
+        duration_min = meeting.audio_duration / 60.0
+        unique_speakers = sorted(list(set(seg.speaker for seg in meeting.segments)))
+
+        lines = [
+            f"TRANSCRIÇÃO DE REUNIÃO: {title.upper()}",
+            f"Data: {date_str}",
+            f"Duração: {duration_min:.1f} minutos",
+            f"Locutores: {', '.join(unique_speakers)}",
+            "=" * 60,
+            ""
+        ]
+
+        for seg in meeting.segments:
+            m = int(seg.start // 60)
+            s = int(seg.start % 60)
+            lines.append(f"[{m:02d}:{s:02d}] {seg.speaker}: {seg.text}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def transcript_to_docx_bytes(meeting: MeetingDetail) -> io.BytesIO:
+        """Gera um arquivo DOCX elegante contendo a transcrição integral dos diálogos."""
+        doc = Document()
+
+        for section in doc.sections:
+            section.top_margin = Inches(1)
+            section.bottom_margin = Inches(1)
+            section.left_margin = Inches(1)
+            section.right_margin = Inches(1)
+
+        title = meeting.summary.title if meeting.summary else meeting.title
+        date_str = meeting.summary.date if meeting.summary else meeting.created_at
+        duration_min = meeting.audio_duration / 60.0
+        unique_speakers = sorted(list(set(seg.speaker for seg in meeting.segments)))
+
+        # Título
+        title_p = doc.add_paragraph()
+        title_run = title_p.add_run(f"Transcrição: {title}")
+        title_run.font.name = "Arial"
+        title_run.font.size = Pt(20)
+        title_run.font.bold = True
+        title_run.font.color.rgb = RGBColor(30, 41, 59)
+        title_p.paragraph_format.space_after = Pt(4)
+
+        # Subtítulo com metadados
+        sub_p = doc.add_paragraph()
+        sub_run = sub_p.add_run(
+            f"Data: {date_str} | Duração: {duration_min:.1f} min | Locutores: {', '.join(unique_speakers)}"
+        )
+        sub_run.font.name = "Arial"
+        sub_run.font.size = Pt(10)
+        sub_run.font.italic = True
+        sub_run.font.color.rgb = RGBColor(100, 116, 139)
+        sub_p.paragraph_format.space_after = Pt(16)
+
+        # Heading Diálogos
+        h1 = doc.add_heading("Diálogos da Reunião", level=1)
+        h1.paragraph_format.space_before = Pt(8)
+        h1.paragraph_format.space_after = Pt(12)
+
+        for seg in meeting.segments:
+            m = int(seg.start // 60)
+            s = int(seg.start % 60)
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(4)
+            p.paragraph_format.line_spacing = 1.15
+
+            time_run = p.add_run(f"[{m:02d}:{s:02d}] ")
+            time_run.font.name = "Arial"
+            time_run.font.size = Pt(9.5)
+            time_run.font.color.rgb = RGBColor(148, 163, 184)
+
+            speaker_run = p.add_run(f"{seg.speaker}: ")
+            speaker_run.font.name = "Arial"
+            speaker_run.font.size = Pt(10.5)
+            speaker_run.bold = True
+            speaker_run.font.color.rgb = RGBColor(37, 99, 235)
+
+            text_run = p.add_run(seg.text)
+            text_run.font.name = "Arial"
+            text_run.font.size = Pt(10.5)
+            text_run.font.color.rgb = RGBColor(30, 41, 59)
+
+        target_stream = io.BytesIO()
+        doc.save(target_stream)
+        target_stream.seek(0)
+        return target_stream
+
+    @classmethod
+    def transcript_to_srt(cls, meeting: MeetingDetail) -> str:
+        """Gera legendas sincronizadas no formato universal SRT."""
+        srt_blocks = []
+        for idx, seg in enumerate(meeting.segments, 1):
+            start_str = cls._format_srt_time(seg.start)
+            end_str = cls._format_srt_time(seg.end)
+            text = f"[{seg.speaker}] {seg.text}"
+            srt_blocks.append(f"{idx}\n{start_str} --> {end_str}\n{text}\n")
+        return "\n".join(srt_blocks)
+

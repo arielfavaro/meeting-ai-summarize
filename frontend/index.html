@@ -261,7 +261,7 @@
           <button class="btn btn-secondary btn-sm" onclick="app.exportFile('txt')">
             📝 Texto (.txt)
           </button>
-          <button class="btn btn-primary btn-sm" onclick="window.print()">
+          <button class="btn btn-primary btn-sm" onclick="app.printMinutes()">
             🖨️ Imprimir / PDF
           </button>
         </div>
@@ -329,6 +329,39 @@
     <!-- ABA 4: TRANSCRIÇÃO INTERATIVA E LOCUTORES  -->
     <!-- ========================================== -->
     <section id="tab-transcript" class="tab-panel">
+      <!-- Barra de Ações Rápidas de Exportação da Transcrição -->
+      <div class="minutes-actions-bar">
+        <div>
+          <h2 id="transcript-title" style="font-size: 1.3rem; font-weight: 700;">Transcrição Completa</h2>
+          <div style="display: flex; gap: 0.5rem; margin-top: 0.35rem; flex-wrap: wrap;">
+            <span class="meta-pill" id="transcript-date">📅 Data: --</span>
+            <span class="meta-pill" id="transcript-duration">⏱️ Duração: --</span>
+            <span class="meta-pill" id="transcript-participants">👥 Locutores: --</span>
+          </div>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-secondary btn-sm" onclick="app.copyTranscriptText()">
+            📋 Copiar Transcrição
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick="app.exportTranscript('md')">
+            📥 Markdown (.md)
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick="app.exportTranscript('docx')">
+            📄 Word (.docx)
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick="app.exportTranscript('txt')">
+            📝 Texto (.txt)
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick="app.exportTranscript('srt')">
+            🎬 Legendas (.srt)
+          </button>
+          <button class="btn btn-primary btn-sm" onclick="app.printTranscript()">
+            🖨️ Imprimir / PDF
+          </button>
+        </div>
+      </div>
+
       <!-- Player de Áudio Sincronizado Fixo -->
       <div class="audio-player-sticky">
         <div class="audio-controls-row">

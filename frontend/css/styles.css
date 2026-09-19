@@ -1127,4 +1127,50 @@ main {
     color: #475569 !important;
     border: 1px solid #e2e8f0 !important;
   }
+
+  /* Modo de Impressão da Transcrição */
+  body.print-transcript-mode #tab-minutes {
+    display: none !important;
+  }
+
+  body.print-transcript-mode #tab-transcript {
+    display: block !important;
+  }
+
+  body.print-transcript-mode .transcript-feed {
+    max-height: none !important;
+    overflow: visible !important;
+    display: block !important;
+  }
+
+  body.print-transcript-mode .utterance-bubble {
+    page-break-inside: avoid;
+    break-inside: avoid;
+    background: #ffffff !important;
+    border: 1px solid #e2e8f0 !important;
+    box-shadow: none !important;
+    margin-bottom: 0.75rem !important;
+    padding: 0.75rem 1rem !important;
+  }
+
+  body.print-transcript-mode .utterance-text {
+    color: #0f172a !important;
+    font-size: 0.95rem !important;
+  }
+
+  body.print-transcript-mode .speaker-name {
+    color: #1e40af !important;
+    font-weight: 700 !important;
+  }
+
+  body.print-transcript-mode .utterance-timestamp {
+    color: #64748b !important;
+  }
+
+  body.print-transcript-mode .speaker-avatar {
+    border: 1px solid #cbd5e1 !important;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
 }
+
