@@ -34,6 +34,7 @@ class MeetingMinutes(BaseModel):
     decisions: List[str] = Field(default_factory=list)
     action_items: List[ActionItem] = Field(default_factory=list)
     open_points: List[str] = Field(default_factory=list)
+    suggested_speakers: Dict[str, str] = Field(default_factory=dict)
     raw_markdown: str
 
 

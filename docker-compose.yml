@@ -17,6 +17,7 @@ services:
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma4:12b}
+      - OLLAMA_NUM_CTX=${OLLAMA_NUM_CTX:-32768}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-medium}
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}

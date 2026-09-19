@@ -30,7 +30,7 @@ from backend import database
 from backend.services.audio_service import AudioService
 from backend.services.diarization import DiarizationService
 from backend.services.transcription import TranscriptionService
-from backend.services.alignment import align_transcription_with_diarization
+from backend.services.alignment import align_transcription_with_diarization, merge_multitrack_segments
 from backend.services.summarizer import SummarizerService
 from backend.services.exporter import ExporterService
 
@@ -58,67 +58,126 @@ JOBS: Dict[str, JobStatus] = {}
 
 
 async def run_pipeline_task(job_id: str, file_id: str, title: str, options: ProcessOptions):
-    """Pipeline assíncrono executado em segundo plano."""
+    """Pipeline assíncrono executado em segundo plano com suporte a faixas ativas múltiplas."""
     job = JOBS[job_id]
     try:
         raw_audio_path = settings.UPLOAD_DIR / file_id
         if not raw_audio_path.exists():
             raise FileNotFoundError(f"Arquivo {file_id} não encontrado.")
 
-        # Passo 1: Pré-processamento e normalização com FFmpeg
+        # Passo 1: Pré-processamento e análise de faixas de áudio
         job.status = "preprocessing"
-        job.progress = 10
-        job.current_step = "Convertendo áudio para 16kHz mono (FFmpeg)..."
+        job.progress = 5
+        job.current_step = "Analisando faixas de áudio e convertendo (FFmpeg)..."
         logger.info(f"[{job_id}] {job.current_step}")
+
+        active_tracks = AudioService.detect_active_audio_tracks(raw_audio_path)
+        logger.info(f"[{job_id}] Faixas ativas detectadas: {active_tracks}")
 
         wav_filename = f"{Path(file_id).stem}_16k.wav"
         processed_wav_path = settings.PROCESSED_DIR / wav_filename
-        wav_path, duration = AudioService.convert_to_wav_16k_mono(raw_audio_path, processed_wav_path)
+        # Gera o áudio mestre para reprodução no player web (com todas as faixas ativas combinadas)
+        wav_path, duration = AudioService.convert_to_wav_16k_mono(raw_audio_path, processed_wav_path, active_tracks=active_tracks)
         duration_minutes = duration / 60.0
 
-        # Passo 2: Diarização 100% Local (Separação de locutores)
-        job.status = "diarizing"
-        job.progress = 30
-        job.current_step = "Identificando e separando locutores (Diarização 100% Local)..."
-        logger.info(f"[{job_id}] {job.current_step}")
+        if len(active_tracks) > 1:
+            job.current_step = f"Processando gravação multi-faixa ({len(active_tracks)} faixas de áudio ativas)..."
+            logger.info(f"[{job_id}] {job.current_step}")
 
-        diarizer = DiarizationService(hf_token=options.hf_token)
-        diarization_segments = diarizer.diarize(
-            audio_path=wav_path,
-            min_speakers=options.min_speakers,
-            max_speakers=options.max_speakers
-        )
+            track_aligned_results = []
+            diarizer = DiarizationService(hf_token=options.hf_token)
 
-        # Passo 3: Transcrição com Faster-Whisper com atualização de progresso
-        job.status = "transcribing"
-        job.progress = 35
-        job.current_step = f"Transcrevendo fala em Português (Faster-Whisper '{options.whisper_model}')..."
-        logger.info(f"[{job_id}] {job.current_step}")
+            for idx, track_no in enumerate(active_tracks):
+                track_step_base = 15 + int((idx / len(active_tracks)) * 55)
+                job.progress = track_step_base
+                job.current_step = f"Processando faixa {idx + 1}/{len(active_tracks)} (stream #{track_no})..."
+                logger.info(f"[{job_id}] {job.current_step}")
 
-        def on_transcribe_progress(current_sec: float, total_sec: float):
-            if total_sec > 0:
-                pct = min(99, int((current_sec / total_sec) * 100))
-                # Interpola progresso entre 35% e 70%
-                job.progress = 35 + int((pct / 100) * 35)
-                job.current_step = f"Transcrevendo: {pct}% ({current_sec/60:.1f}/{total_sec/60:.1f} min)..."
+                # Extrai a faixa individual para arquivo temporário de 16kHz
+                track_wav_filename = f"{Path(file_id).stem}_track_{track_no}_16k.wav"
+                track_wav_path = settings.PROCESSED_DIR / track_wav_filename
+                AudioService.extract_track_to_wav_16k(raw_audio_path, track_no, track_wav_path)
 
-        transcription_raw = TranscriptionService.transcribe(
-            audio_path=wav_path,
-            model_size=options.whisper_model,
-            language=options.language,
-            progress_callback=on_transcribe_progress
-        )
+                # Diarização da faixa individual
+                # Em arquivos multi-faixa, não forçamos min_speakers alto em canais individuais
+                # permitindo que um microfone permaneça como 1 orador único (k=1)
+                track_diar_segments = diarizer.diarize(
+                    audio_path=track_wav_path,
+                    min_speakers=None,
+                    max_speakers=options.max_speakers
+                )
 
-        # Passo 4: Alinhamento de transcrição e locutores
-        job.status = "aligning"
-        job.progress = 75
-        job.current_step = "Sincronizando falas e oradores..."
-        logger.info(f"[{job_id}] {job.current_step}")
+                # Transcrição da faixa individual
+                def on_track_progress(current_sec: float, total_sec: float, t_idx=idx, base=track_step_base):
+                    if total_sec > 0:
+                        pct = min(99, int((current_sec / total_sec) * 100))
+                        progress_increment = int((pct / 100) * (55 / len(active_tracks)))
+                        job.progress = min(70, base + progress_increment)
+                        job.current_step = f"Transcrevendo faixa {t_idx + 1}/{len(active_tracks)}: {pct}% ({current_sec/60:.1f}/{total_sec/60:.1f} min)..."
 
-        aligned_segments = align_transcription_with_diarization(
-            transcription_segments=transcription_raw,
-            diarization_segments=diarization_segments
-        )
+                track_transcription = TranscriptionService.transcribe(
+                    audio_path=track_wav_path,
+                    model_size=options.whisper_model,
+                    language=options.language,
+                    progress_callback=on_track_progress
+                )
+
+                # Alinha a transcrição da faixa com sua diarização
+                track_aligned = align_transcription_with_diarization(
+                    transcription_segments=track_transcription,
+                    diarization_segments=track_diar_segments
+                )
+                track_aligned_results.append(track_aligned)
+
+            # Combina e intercala cronologicamente as faixas
+            job.status = "aligning"
+            job.progress = 75
+            job.current_step = "Sincronizando e intercalando faixas de áudio..."
+            logger.info(f"[{job_id}] {job.current_step}")
+
+            aligned_segments = merge_multitrack_segments(track_aligned_results)
+
+        else:
+            # Fluxo padrão de faixa única
+            job.status = "diarizing"
+            job.progress = 30
+            job.current_step = "Identificando e separando locutores (Diarização Local)..."
+            logger.info(f"[{job_id}] {job.current_step}")
+
+            diarizer = DiarizationService(hf_token=options.hf_token)
+            diarization_segments = diarizer.diarize(
+                audio_path=wav_path,
+                min_speakers=options.min_speakers,
+                max_speakers=options.max_speakers
+            )
+
+            job.status = "transcribing"
+            job.progress = 35
+            job.current_step = f"Transcrevendo fala em Português (Faster-Whisper '{options.whisper_model}')..."
+            logger.info(f"[{job_id}] {job.current_step}")
+
+            def on_transcribe_progress(current_sec: float, total_sec: float):
+                if total_sec > 0:
+                    pct = min(99, int((current_sec / total_sec) * 100))
+                    job.progress = 35 + int((pct / 100) * 35)
+                    job.current_step = f"Transcrevendo: {pct}% ({current_sec/60:.1f}/{total_sec/60:.1f} min)..."
+
+            transcription_raw = TranscriptionService.transcribe(
+                audio_path=wav_path,
+                model_size=options.whisper_model,
+                language=options.language,
+                progress_callback=on_transcribe_progress
+            )
+
+            job.status = "aligning"
+            job.progress = 75
+            job.current_step = "Sincronizando falas e oradores..."
+            logger.info(f"[{job_id}] {job.current_step}")
+
+            aligned_segments = align_transcription_with_diarization(
+                transcription_segments=transcription_raw,
+                diarization_segments=diarization_segments
+            )
 
         # Passo 5: Geração da Ata de Reunião com Ollama Local
         job.status = "summarizing"
@@ -138,6 +197,18 @@ async def run_pipeline_task(job_id: str, file_id: str, title: str, options: Proc
         # Mapeamento inicial de locutores
         unique_speakers = sorted(list(set(s.speaker for s in aligned_segments)))
         speaker_map = {s: s for s in unique_speakers}
+
+        # Aplicar sugestões de nomes reais inferidos pelo Ollama se houver alta confiança
+        if summary and hasattr(summary, "suggested_speakers") and summary.suggested_speakers:
+            for spk_id, real_name in summary.suggested_speakers.items():
+                real_name_clean = str(real_name).strip()
+                if spk_id in speaker_map and real_name_clean and real_name_clean != spk_id:
+                    logger.info(f"[{job_id}] Nome real inferido: '{spk_id}' -> '{real_name_clean}'")
+                    speaker_map[spk_id] = real_name_clean
+            # Sincronizar os identificadores dos segmentos
+            for seg in aligned_segments:
+                if seg.speaker in speaker_map:
+                    seg.speaker = speaker_map[seg.speaker]
 
         meeting_detail = MeetingDetail(
             id=meeting_id,

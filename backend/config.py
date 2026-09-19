@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # No Docker, pode ser "http://ollama:11434" ou "http://host.docker.internal:11434" se rodar no host
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma4:12b")
+    OLLAMA_NUM_CTX: int = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
 
     # Whisper (Transcrição)
     WHISPER_MODEL_SIZE: str = os.getenv("WHISPER_MODEL_SIZE", "medium")

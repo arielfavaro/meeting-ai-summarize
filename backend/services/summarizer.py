@@ -116,10 +116,18 @@ class SummarizerService:
             "Você é um secretário executivo de alto nível e especialista em governança corporativa e gestão ágil. "
             "Sua tarefa é analisar a transcrição de uma reunião em Português do Brasil e produzir uma ATA DE REUNIÃO "
             "profissional, clara, concisa e altamente estruturada.\n\n"
+            "DICA DE LOCUTORES: Analise as falas para identificar se os participantes se chamam pelos nomes próprios "
+            "(ex: 'Oi Ariel', 'Carlos, você pode falar?', 'Aqui é a Mariana'). Se conseguir inferir com clareza o nome real de algum Locutor, "
+            "preencha no campo 'suggested_speakers' associando o identificador ao nome real (ex: 'Locutor 1': 'Ariel'). "
+            "Se não for possível inferir, mantenha o identificador original.\n\n"
             "Retorne APENAS um objeto JSON válido estritamente com a seguinte estrutura:\n"
             "{\n"
             '  "title": "Título claro e objetivo da reunião",\n'
             '  "executive_summary": "Resumo executivo em 1 a 2 parágrafos com o propósito e principais conclusões",\n'
+            '  "suggested_speakers": {\n'
+            '    "Locutor 1": "Nome Real 1 ou Locutor 1",\n'
+            '    "Locutor 2": "Nome Real 2 ou Locutor 2"\n'
+            '  },\n'
             '  "main_topics": [\n'
             '    {\n'
             '      "title": "Nome do tópico",\n'
@@ -154,6 +162,12 @@ class SummarizerService:
             {"role": "user", "content": user_content}
         ]
 
+        # Dimensionamento adaptativo da janela de contexto
+        estimated_tokens = int(len(dialogue_text) / 2.8) + 2500
+        max_ctx = getattr(settings, "OLLAMA_NUM_CTX", 32768)
+        num_ctx = min(max_ctx, max(4096, estimated_tokens))
+        logger.info(f"Ollama num_ctx adaptativo dimensionado para {num_ctx} tokens (teto configurado: {max_ctx})")
+
         async with httpx.AsyncClient(timeout=600.0) as client:
             raw_response = ""
             try:
@@ -168,7 +182,7 @@ class SummarizerService:
                         "options": {
                             "temperature": 0.3,
                             "top_p": 0.9,
-                            "num_ctx": 16384
+                            "num_ctx": num_ctx
                         }
                     }
                 )
@@ -189,7 +203,7 @@ class SummarizerService:
                         "options": {
                             "temperature": 0.3,
                             "top_p": 0.9,
-                            "num_ctx": 16384
+                            "num_ctx": num_ctx
                         }
                     }
                 )
@@ -205,6 +219,9 @@ class SummarizerService:
             actions = [ActionItem(**a) for a in parsed.get("action_items", [])]
             decisions = [str(d) for d in parsed.get("decisions", [])]
             open_points = [str(o) for o in parsed.get("open_points", [])]
+            suggested_speakers = parsed.get("suggested_speakers", {})
+            if not isinstance(suggested_speakers, dict):
+                suggested_speakers = {}
 
             now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
             final_title = parsed.get("title") or title
@@ -233,6 +250,7 @@ class SummarizerService:
                 decisions=decisions,
                 action_items=actions,
                 open_points=open_points,
+                suggested_speakers=suggested_speakers,
                 raw_markdown=markdown_content
             )
 
