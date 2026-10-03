@@ -1,6 +1,39 @@
 /**
  * APLICAÇÃO PRINCIPAL - CONTROLE DE ESTADO, ABAS E FLUXO DE PROCESSAMENTO
  */
+
+/** Escapa texto antes de interpolar em HTML (conteúdo vem do LLM, da transcrição e do usuário). */
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** ISO 8601 -> "dd/mm/aaaa hh:mm". Valores legados (já formatados) são devolvidos como estão. */
+function formatDateTime(value) {
+  if (!value) return "--";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+}
+
+function formatDateOnly(value) {
+  if (!value) return "";
+  const d = new Date(`${value}T12:00:00`);
+  return Number.isNaN(d.getTime()) ? value : d.toLocaleDateString("pt-BR");
+}
+
+const OBJECTIVE_STATUS = {
+  atingido: "✅ Atingido",
+  parcial: "🟡 Parcial",
+  nao_atingido: "❌ Não atingido",
+  indefinido: "⚪ Indefinido",
+};
+const OBJECTIVE_ORIGIN = { declarado: "declarado na reunião", inferido: "inferido", informado: "informado por você" };
+
 class MeetingApp {
   constructor() {
     this.selectedFile = null;
@@ -122,7 +155,10 @@ class MeetingApp {
         body: formData,
       });
 
-      if (!uploadResp.ok) throw new Error("Falha no upload do arquivo.");
+      if (!uploadResp.ok) {
+        const err = await uploadResp.json().catch(() => ({}));
+        throw new Error(err.detail || "Falha no upload do arquivo.");
+      }
       const uploadData = await uploadResp.json();
       this._appendLog(`Upload concluído! ID: ${uploadData.file_id} (Duração: ${uploadData.duration.toFixed(1)}s)`);
 
@@ -147,12 +183,24 @@ class MeetingApp {
       if (customPrompt) processForm.append("custom_prompt", customPrompt);
       if (hfToken) processForm.append("hf_token", hfToken);
 
+      // Contexto da reunião
+      const objective = document.getElementById("input-meeting-objective").value.trim();
+      const participants = document.getElementById("input-participants").value.trim();
+      const glossary = document.getElementById("input-glossary").value.trim();
+      processForm.append("meeting_type", document.getElementById("select-meeting-type").value || "geral");
+      if (objective) processForm.append("objective", objective);
+      if (participants) processForm.append("participants", participants);
+      if (glossary) processForm.append("glossary", glossary);
+
       const startResp = await fetch("/api/process", {
         method: "POST",
         body: processForm,
       });
 
-      if (!startResp.ok) throw new Error("Erro ao disparar pipeline.");
+      if (!startResp.ok) {
+        const err = await startResp.json().catch(() => ({}));
+        throw new Error(typeof err.detail === "string" ? err.detail : "Erro ao disparar pipeline.");
+      }
       const startData = await startResp.json();
       this.activeJobId = startData.job_id;
 
@@ -266,36 +314,49 @@ class MeetingApp {
 
   _renderMeetingData(meeting) {
     this.currentMeeting = meeting;
+    this.segmentStartById = new Map(meeting.segments.map((s) => [s.id, s.start]));
+    // Cores e ordem dos locutores seguem o ID estável (não mudam ao renomear)
+    this.speakerOrder = Array.from(new Set(meeting.segments.map((s) => s.speaker_id || s.speaker)));
 
-    // 1. Preencher Ata
-    if (meeting.summary) {
-      document.getElementById("minutes-title").textContent = meeting.summary.title;
-      document.getElementById("minutes-date").textContent = `📅 Data: ${meeting.summary.date}`;
+    const s = meeting.summary;
+    if (s) {
+      document.getElementById("minutes-title").textContent = s.title;
+      document.getElementById("minutes-date").textContent = `📅 Data: ${formatDateTime(s.date || meeting.created_at)}`;
       document.getElementById("minutes-duration").textContent = `⏱️ Duração: ${(meeting.audio_duration / 60).toFixed(1)} min`;
-      document.getElementById("minutes-participants").textContent = `👥 Participantes: ${meeting.summary.participants.join(", ")}`;
-      document.getElementById("minutes-exec-summary").textContent = meeting.summary.executive_summary;
+      document.getElementById("minutes-participants").textContent = `👥 Participantes: ${(s.participants || []).join(", ")}`;
+      document.getElementById("minutes-exec-summary").textContent = s.executive_summary;
+
+      this._renderWarnings(s);
+      this._renderObjectives(s.objectives || []);
 
       // Decisões
       const decList = document.getElementById("minutes-decisions-list");
       decList.innerHTML = "";
-      (meeting.summary.decisions || []).forEach((d) => {
+      const decisions = (s.decisions || []).map((d) => (typeof d === "string" ? { description: d, evidence: [] } : d));
+      if (decisions.length === 0) {
+        decList.innerHTML = `<li class="decision-item"><span class="decision-icon">—</span><span>Nenhuma decisão formal registrada.</span></li>`;
+      }
+      decisions.forEach((d) => {
         const li = document.createElement("li");
         li.className = "decision-item";
-        li.innerHTML = `<span class="decision-icon">✅</span><span>${d}</span>`;
+        li.innerHTML = `<span class="decision-icon">✅</span><span>${escapeHtml(d.description)}${this._groundingHtml(d)}</span>`;
         decList.appendChild(li);
       });
 
       // Ações
       const actionsTbody = document.getElementById("minutes-actions-tbody");
       actionsTbody.innerHTML = "";
-      if (meeting.summary.action_items && meeting.summary.action_items.length > 0) {
-        meeting.summary.action_items.forEach((act) => {
+      if (s.action_items && s.action_items.length > 0) {
+        s.action_items.forEach((act) => {
+          const deadline = act.due_date
+            ? `${escapeHtml(act.deadline)}<br><small style="color: var(--text-muted);">${escapeHtml(formatDateOnly(act.due_date))}</small>`
+            : escapeHtml(act.deadline);
           const tr = document.createElement("tr");
           tr.innerHTML = `
-            <td><strong>${act.task}</strong></td>
-            <td><span class="meta-pill">${act.owner}</span></td>
-            <td>${act.deadline}</td>
-            <td><span class="tag-badge ${act.status === 'Concluído' ? 'tag-done' : 'tag-pending'}">${act.status}</span></td>
+            <td><strong>${escapeHtml(act.task)}</strong>${this._groundingHtml(act)}</td>
+            <td><span class="meta-pill">${escapeHtml(act.owner)}</span></td>
+            <td>${deadline}</td>
+            <td><span class="tag-badge ${act.status === "Concluído" ? "tag-done" : "tag-pending"}">${escapeHtml(act.status)}</span></td>
           `;
           actionsTbody.appendChild(tr);
         });
@@ -306,45 +367,33 @@ class MeetingApp {
       // Tópicos
       const topicsContainer = document.getElementById("minutes-topics-container");
       topicsContainer.innerHTML = "";
-      (meeting.summary.main_topics || []).forEach((t, idx) => {
+      (s.main_topics || []).forEach((t, idx) => {
         const div = document.createElement("div");
         div.style.background = "rgba(255, 255, 255, 0.02)";
         div.style.padding = "1rem";
         div.style.borderRadius = "var(--radius-md)";
         div.style.border = "1px solid var(--border-color)";
         div.innerHTML = `
-          <h4 style="font-size: 1rem; color: #60a5fa; margin-bottom: 0.35rem;">${idx + 1}. ${t.title}</h4>
-          <p style="font-size: 0.9rem; color: #cbd5e1; margin-bottom: 0.5rem;">${t.discussion}</p>
-          ${t.conclusions ? `<p style="font-size: 0.85rem; color: #94a3b8;"><strong>Conclusão:</strong> ${t.conclusions}</p>` : ''}
+          <h4 style="font-size: 1rem; color: #60a5fa; margin-bottom: 0.35rem;">${idx + 1}. ${escapeHtml(t.title)}${this._evidenceHtml(t.evidence)}</h4>
+          <p style="font-size: 0.9rem; color: #cbd5e1; margin-bottom: 0.5rem;">${escapeHtml(t.discussion)}</p>
+          ${t.conclusions ? `<p style="font-size: 0.85rem; color: #94a3b8;"><strong>Conclusão:</strong> ${escapeHtml(t.conclusions)}</p>` : ""}
         `;
         topicsContainer.appendChild(div);
       });
 
-      // Pontos em aberto
-      const openPointsCard = document.getElementById("card-open-points");
-      const openPointsList = document.getElementById("minutes-open-points-list");
-      if (meeting.summary.open_points && meeting.summary.open_points.length > 0) {
-        openPointsCard.style.display = "block";
-        openPointsList.innerHTML = "";
-        meeting.summary.open_points.forEach((op) => {
-          const li = document.createElement("li");
-          li.textContent = op;
-          openPointsList.appendChild(li);
-        });
-      } else {
-        openPointsCard.style.display = "none";
-      }
+      this._renderItemList("card-open-points", "minutes-open-points-list", s.open_points);
+      this._renderItemList("card-risks", "minutes-risks-list", s.risks);
     }
 
-    // 2. Preencher Metadados da Transcrição
-    const uniqueSpeakers = Array.from(new Set(meeting.segments.map((s) => s.speaker)));
+    // Metadados da transcrição
+    const speakerNames = this._speakerNames(meeting);
     const transcriptTitleEl = document.getElementById("transcript-title");
     if (transcriptTitleEl) {
-      transcriptTitleEl.textContent = meeting.summary ? `Transcrição: ${meeting.summary.title}` : `Transcrição: ${meeting.title}`;
+      transcriptTitleEl.textContent = `Transcrição: ${s ? s.title : meeting.title}`;
     }
     const transcriptDateEl = document.getElementById("transcript-date");
     if (transcriptDateEl) {
-      transcriptDateEl.textContent = `📅 Data: ${meeting.summary ? meeting.summary.date : (meeting.created_at || "--")}`;
+      transcriptDateEl.textContent = `📅 Data: ${formatDateTime(s && s.date ? s.date : meeting.created_at)}`;
     }
     const transcriptDurEl = document.getElementById("transcript-duration");
     if (transcriptDurEl) {
@@ -352,32 +401,153 @@ class MeetingApp {
     }
     const transcriptPartEl = document.getElementById("transcript-participants");
     if (transcriptPartEl) {
-      transcriptPartEl.textContent = `👥 Locutores (${uniqueSpeakers.length}): ${uniqueSpeakers.join(", ")}`;
+      transcriptPartEl.textContent = `👥 Locutores (${speakerNames.length}): ${speakerNames.join(", ")}`;
     }
 
-    // 3. Carregar Player de Áudio
     audioPlayer.loadAudio(meeting.audio_url, meeting.segments);
-
-    // 4. Renderizar Locutores e Transcrição
     this._renderSpeakerInputs(meeting);
+    this._renderSpeakerSuggestions(meeting);
     this._renderTranscriptFeed(meeting.segments);
+  }
+
+  _speakerNames(meeting) {
+    const names = new Map();
+    meeting.segments.forEach((seg) => names.set(seg.speaker_id || seg.speaker, seg.speaker));
+    return Array.from(names.values());
+  }
+
+  _speakerColor(speakerId) {
+    const idx = Math.max(0, (this.speakerOrder || []).indexOf(speakerId));
+    return this.speakerColors[idx % this.speakerColors.length];
+  }
+
+  _renderWarnings(summary) {
+    const container = document.getElementById("minutes-warnings");
+    container.innerHTML = "";
+    const warnings = [...(summary.warnings || [])];
+    if (summary.source === "heuristic") {
+      warnings.unshift("Ata gerada em modo de contingência (sem LLM). Verifique se o Ollama está ativo e regere a ata.");
+    }
+    warnings.forEach((w) => {
+      const div = document.createElement("div");
+      div.className = "warning-banner";
+      div.textContent = `⚠️ ${w}`;
+      container.appendChild(div);
+    });
+  }
+
+  _renderObjectives(objectives) {
+    const card = document.getElementById("card-objectives");
+    const list = document.getElementById("minutes-objectives-list");
+    list.innerHTML = "";
+    card.style.display = objectives.length ? "block" : "none";
+    objectives.forEach((o) => {
+      const li = document.createElement("li");
+      li.className = "objective-item";
+      li.innerHTML = `
+        <span class="status-badge status-${escapeHtml(o.status)}">${escapeHtml(OBJECTIVE_STATUS[o.status] || o.status)}</span>
+        <div class="objective-body">
+          <div class="objective-desc">${escapeHtml(o.description)}${this._evidenceHtml(o.evidence)}</div>
+          ${o.notes ? `<div class="objective-notes">${escapeHtml(o.notes)}</div>` : ""}
+          <div class="objective-origin">${escapeHtml(OBJECTIVE_ORIGIN[o.origin] || o.origin || "")}</div>
+        </div>
+      `;
+      list.appendChild(li);
+    });
+  }
+
+  _renderItemList(cardId, listId, items) {
+    const card = document.getElementById(cardId);
+    const list = document.getElementById(listId);
+    if (!card || !list) return;
+    const normalized = (items || []).map((i) => (typeof i === "string" ? { description: i, evidence: [] } : i));
+    card.style.display = normalized.length ? "block" : "none";
+    list.innerHTML = "";
+    normalized.forEach((item) => {
+      const li = document.createElement("li");
+      li.innerHTML = `${escapeHtml(item.description)}${this._evidenceHtml(item.evidence)}`;
+      list.appendChild(li);
+    });
+  }
+
+  /** Chips clicáveis com o instante de cada trecho que sustenta o item (vai para a transcrição/áudio). */
+  _evidenceHtml(evidence) {
+    if (!evidence || !evidence.length || !this.segmentStartById) return "";
+    const chips = evidence
+      .filter((id) => this.segmentStartById.has(id))
+      .slice(0, 4)
+      .map((id) => {
+        const t = this.segmentStartById.get(id);
+        return `<button type="button" class="evidence-chip" title="Ouvir o trecho" onclick="app.goToSegment(${Number(id)})">${audioPlayer.formatTime(t)}</button>`;
+      })
+      .join("");
+    return chips ? `<span class="evidence-chips">${chips}</span>` : "";
+  }
+
+  _groundingHtml(item) {
+    const flag = item.grounded === false ? `<span class="ungrounded-flag" title="O modelo não apontou trecho da transcrição que sustente este item">⚠️ sem evidência</span>` : "";
+    return this._evidenceHtml(item.evidence) + flag;
+  }
+
+  goToSegment(segmentId) {
+    const start = this.segmentStartById && this.segmentStartById.get(segmentId);
+    if (start === undefined) return;
+    this.switchTab("transcript");
+    audioPlayer.jumpTo(start);
+    const bubble = document.querySelector(`.utterance-bubble[data-id="${Number(segmentId)}"]`);
+    if (bubble) {
+      bubble.scrollIntoView({ behavior: "smooth", block: "center" });
+      bubble.classList.add("highlight");
+      setTimeout(() => bubble.classList.remove("highlight"), 2500);
+    }
   }
 
   _renderSpeakerInputs(meeting) {
     const container = document.getElementById("speakers-inputs-container");
     container.innerHTML = "";
 
-    const uniqueSpeakers = Array.from(new Set(meeting.segments.map((s) => s.speaker)));
+    const seen = new Map();
+    meeting.segments.forEach((seg) => {
+      const id = seg.speaker_id || seg.speaker;
+      if (!seen.has(id)) seen.set(id, seg.speaker);
+    });
 
-    uniqueSpeakers.forEach((speaker, index) => {
-      const color = this.speakerColors[index % this.speakerColors.length];
+    seen.forEach((displayName, speakerId) => {
       const chip = document.createElement("div");
       chip.className = "speaker-input-chip";
       chip.innerHTML = `
-        <span class="speaker-color-dot" style="background-color: ${color};"></span>
-        <input type="text" data-orig="${speaker}" value="${speaker}" title="Edite para renomear este orador">
+        <span class="speaker-color-dot" style="background-color: ${this._speakerColor(speakerId)};"></span>
+        <input type="text" data-speaker-id="${escapeHtml(speakerId)}" value="${escapeHtml(displayName)}" title="${escapeHtml(speakerId)} — edite para renomear">
       `;
       container.appendChild(chip);
+    });
+  }
+
+  /** Sugestões do LLM que não foram aplicadas automaticamente (evidência fraca): o usuário decide. */
+  _renderSpeakerSuggestions(meeting) {
+    const container = document.getElementById("speaker-suggestions-container");
+    if (!container) return;
+    container.innerHTML = "";
+    const pending = ((meeting.summary && meeting.summary.speaker_suggestions) || []).filter(
+      (sug) => !sug.applied && sug.confidence >= 0.5 && sug.reason !== "nome já definido pelo usuário" && sug.name
+    );
+    pending.forEach((sug) => {
+      const div = document.createElement("div");
+      div.className = "speaker-suggestion";
+      div.innerHTML = `
+        <span>💡 ${escapeHtml(sug.speaker_id)} pode ser <strong>${escapeHtml(sug.name)}</strong>
+          <small>(${Math.round(sug.confidence * 100)}% · ${escapeHtml(sug.reason || sug.kind)})</small></span>
+      `;
+      const btn = document.createElement("button");
+      btn.className = "btn btn-secondary btn-sm";
+      btn.textContent = "Usar";
+      btn.onclick = () => {
+        const input = document.querySelector(`.speaker-input-chip input[data-speaker-id="${CSS.escape(sug.speaker_id)}"]`);
+        if (input) input.value = sug.name;
+        div.remove();
+      };
+      div.appendChild(btn);
+      container.appendChild(div);
     });
   }
 
@@ -385,27 +555,25 @@ class MeetingApp {
     const feed = document.getElementById("transcript-feed-container");
     feed.innerHTML = "";
 
-    const uniqueSpeakers = Array.from(new Set(segments.map((s) => s.speaker)));
-
     segments.forEach((seg) => {
-      const speakerIdx = uniqueSpeakers.indexOf(seg.speaker);
-      const color = this.speakerColors[speakerIdx % this.speakerColors.length];
-      const initials = seg.speaker.split(" ").map((w) => w[0]).join("").substring(0, 2).toUpperCase();
+      const color = this._speakerColor(seg.speaker_id || seg.speaker);
+      const initials = (seg.speaker || "?").split(" ").map((w) => w[0]).join("").substring(0, 2).toUpperCase();
 
       const bubble = document.createElement("div");
       bubble.className = "utterance-bubble";
+      bubble.setAttribute("data-id", seg.id);
       bubble.setAttribute("data-start", seg.start);
       bubble.setAttribute("data-end", seg.end);
       bubble.onclick = () => audioPlayer.jumpTo(seg.start);
 
       bubble.innerHTML = `
-        <div class="speaker-avatar" style="background-color: ${color};">${initials}</div>
+        <div class="speaker-avatar" style="background-color: ${color};">${escapeHtml(initials)}</div>
         <div class="utterance-body">
           <div class="utterance-header">
-            <span class="speaker-name">${seg.speaker}</span>
+            <span class="speaker-name">${escapeHtml(seg.speaker)}</span>
             <span class="utterance-timestamp">▶ ${audioPlayer.formatTime(seg.start)} - ${audioPlayer.formatTime(seg.end)}</span>
           </div>
-          <div class="utterance-text">${seg.text}</div>
+          <div class="utterance-text">${escapeHtml(seg.text)}</div>
         </div>
       `;
       feed.appendChild(bubble);
@@ -429,17 +597,15 @@ class MeetingApp {
   async saveSpeakerNames(regenerateSummary = false) {
     if (!this.currentMeeting) return;
 
-    const inputs = document.querySelectorAll(".speaker-input-chip input");
+    // Envia speaker_id -> nome. Nome vazio volta para o rótulo padrão.
     const speakerMap = {};
-    inputs.forEach((input) => {
-      const orig = input.getAttribute("data-orig");
-      const newVal = input.value.trim();
-      if (newVal) speakerMap[orig] = newVal;
+    document.querySelectorAll(".speaker-input-chip input").forEach((input) => {
+      speakerMap[input.getAttribute("data-speaker-id")] = input.value.trim();
     });
 
     try {
       this.showToast(regenerateSummary ? "Regerando ata com novos oradores..." : "Salvando nomes...");
-      const resp = await fetch(`/api/meetings/${this.currentMeeting.id}/speakers`, {
+      const resp = await fetch(`/api/meetings/${encodeURIComponent(this.currentMeeting.id)}/speakers`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -452,7 +618,7 @@ class MeetingApp {
       if (!resp.ok) throw new Error("Erro ao atualizar oradores.");
       const updated = await resp.json();
       this._renderMeetingData(updated);
-      this.showToast("Nomes atualizados com sucesso!");
+      this.showToast("Nomes atualizados na transcrição e na ata!");
     } catch (e) {
       alert(`Erro: ${e.message}`);
     }
@@ -543,16 +709,16 @@ class MeetingApp {
         card.className = "meeting-card";
         card.innerHTML = `
           <div>
-            <h3 class="meeting-card-title">${m.title}</h3>
+            <h3 class="meeting-card-title">${escapeHtml(m.title)}</h3>
             <div class="meeting-card-meta">
-              <span>📅 ${m.created_at}</span>
+              <span>📅 ${escapeHtml(formatDateTime(m.created_at))}</span>
               <span>⏱️ ${(m.audio_duration / 60).toFixed(1)} minutos</span>
               <span>👥 ${m.speaker_count} interlocutores</span>
             </div>
           </div>
           <div class="meeting-card-actions">
-            <button class="btn btn-primary btn-sm" onclick="app.openMeeting('${m.id}')">Abrir Ata</button>
-            <button class="btn btn-secondary btn-sm" style="color: var(--accent-rose);" onclick="app.deleteMeeting('${m.id}')">Excluir</button>
+            <button class="btn btn-primary btn-sm" onclick="app.openMeeting('${escapeHtml(m.id)}')">Abrir Ata</button>
+            <button class="btn btn-secondary btn-sm" style="color: var(--accent-rose);" onclick="app.deleteMeeting('${escapeHtml(m.id)}')">Excluir</button>
           </div>
         `;
         grid.appendChild(card);
@@ -578,7 +744,8 @@ class MeetingApp {
 
   async openMeeting(meetingId) {
     try {
-      const resp = await fetch(`/api/meetings/${meetingId}`);
+      const resp = await fetch(`/api/meetings/${encodeURIComponent(meetingId)}`);
+      if (!resp.ok) throw new Error("not found");
       const meeting = await resp.json();
       this._renderMeetingData(meeting);
       this.switchTab("minutes");
@@ -591,7 +758,7 @@ class MeetingApp {
   async deleteMeeting(meetingId) {
     if (!confirm("Tem certeza que deseja excluir esta reunião?")) return;
     try {
-      await fetch(`/api/meetings/${meetingId}`, { method: "DELETE" });
+      await fetch(`/api/meetings/${encodeURIComponent(meetingId)}`, { method: "DELETE" });
       this.loadMeetingsHistory();
       this.showToast("Reunião removida com sucesso.");
     } catch (e) {
@@ -605,7 +772,7 @@ class MeetingApp {
 
     const toast = document.createElement("div");
     toast.className = "notification-toast";
-    toast.innerHTML = `<span>✨</span><span>${message}</span>`;
+    toast.innerHTML = `<span>✨</span><span>${escapeHtml(message)}</span>`;
     document.body.appendChild(toast);
 
     setTimeout(() => {

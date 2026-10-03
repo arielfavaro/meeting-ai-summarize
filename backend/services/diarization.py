@@ -66,7 +66,12 @@ class DiarizationService:
         try:
             return self._diarize_speechbrain(audio_path, min_speakers, max_speakers)
         except Exception as e:
-            logger.warning(f"SpeechBrain indisponível ({e}). Executando motor acústico Librosa...")
+            logger.warning(f"SpeechBrain indisponível ({e}). Executando motor acústico Librosa...", exc_info=True)
+
+        # 3. Fallback acústico (MFCC + pitch + clustering). Antes desta correção o método
+        #    caía no final sem retorno e devolvia None, jogando toda a fala em "Locutor 1".
+        return self._diarize_local(audio_path, min_speakers, max_speakers)
+
     def _diarize_speechbrain(
         self,
         audio_path: Path,

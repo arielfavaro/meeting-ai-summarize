@@ -1,0 +1,11 @@
+{
+  "geral": "",
+  "daily": "TIPO: Daily/stand-up. Para cada locutor, destaque o que foi feito, o que será feito e impedimentos (impedimentos vão em `risks`). Decisões costumam ser poucas.",
+  "planejamento": "TIPO: Planejamento. Destaque escopo acordado, prioridades, estimativas citadas, dependências e compromissos com prazo.",
+  "retrospectiva": "TIPO: Retrospectiva. Organize os tópicos em 'o que funcionou', 'o que melhorar' e 'ações de melhoria'; ações de melhoria vão em `action_items`.",
+  "one_on_one": "TIPO: 1:1. Registre feedbacks, temas de desenvolvimento e combinados com tom neutro e respeitoso; evite juízos de valor e detalhes pessoais sensíveis.",
+  "comercial": "TIPO: Reunião comercial. Destaque necessidades e dores do cliente, objeções, valores/condições citados e próximos passos comerciais.",
+  "tecnica": "TIPO: Reunião técnica. Destaque decisões de arquitetura/implementação, alternativas avaliadas, trade-offs e débitos técnicos (débitos e riscos vão em `risks`).",
+  "entrevista": "TIPO: Entrevista. Registre perguntas e respostas relevantes de forma factual; não faça avaliação de mérito do candidato.",
+  "status_report": "TIPO: Status report. Organize por frente/projeto: andamento, indicadores citados, desvios de prazo/custo e pedidos de apoio."
+}

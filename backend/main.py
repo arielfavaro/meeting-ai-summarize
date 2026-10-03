@@ -1,12 +1,12 @@
 import os
 import sys
-import uuid
 import json
 import asyncio
 import logging
-from pathlib import Path
-from typing import Dict, Any, Optional
+from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
 
 # Configurar caminhos para bibliotecas CUDA (CTranslate2 / Faster-Whisper)
 for _dir in [Path("/usr/local/lib/python3.10/site-packages"), Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"]:
@@ -16,263 +16,102 @@ for _dir in [Path("/usr/local/lib/python3.10/site-packages"), Path(sys.prefix) /
         _cur = os.environ.get("LD_LIBRARY_PATH", "")
         os.environ["LD_LIBRARY_PATH"] = f"{_cublas_dir}:{_cudnn_dir}:{_cur}"
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Response
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Response, Depends
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
 
 from backend.config import settings
-from backend.models.schemas import (
-    JobStatus, MeetingDetail, MeetingListItem, ProcessOptions,
-    UpdateSpeakersRequest, RegenerateSummaryRequest, SpeakerSegment
+from backend.database import MeetingRepository
+from backend.dependencies import (
+    get_file_store, get_jobs, get_llm_client, get_minutes_generator, get_pipeline, get_repo,
 )
-from backend import database
+from backend.models.schemas import (
+    JobStatus, MeetingContext, MeetingDetail, ProcessOptions, RegenerateSummaryRequest, UpdateSpeakersRequest,
+)
 from backend.services.audio_service import AudioService
-from backend.services.diarization import DiarizationService
-from backend.services.transcription import TranscriptionService
-from backend.services.alignment import align_transcription_with_diarization, merge_multitrack_segments
-from backend.services.summarizer import SummarizerService
 from backend.services.exporter import ExporterService
+from backend.services.file_store import FileStore, FileTooLargeError, InvalidFileError
+from backend.services.jobs import FINAL_STATES, JobRegistry
+from backend.services.llm.ollama_client import OllamaClient
+from backend.services.minutes.generator import MinutesGenerator, MinutesRequest
+from backend.services.pipeline import MeetingPipeline, apply_speaker_suggestions
+from backend.services.speakers import present_meeting, sync_display_names
 
-# Configuração de Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("meeting_ai")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    settings.ensure_dirs()
+    get_repo()  # aplica migrações do banco na subida
+    yield
+
 
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description="Sistema de IA Local para Transcrição, Diarização e Atas de Reunião em PT-BR"
+    description="Sistema de IA Local para Transcrição, Diarização e Atas de Reunião em PT-BR",
+    lifespan=lifespan,
 )
 
-# CORS liberado para acesso local ou de rede
+# Sem credenciais: allow_origins=["*"] + allow_credentials=True é inseguro (e inválido pela especificação CORS).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Memória temporária para status dos jobs em execução
-JOBS: Dict[str, JobStatus] = {}
+
+def _load_meeting(repo: MeetingRepository, meeting_id: str) -> MeetingDetail:
+    meeting = repo.get(meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Reunião não encontrada.")
+    return meeting
 
 
-async def run_pipeline_task(job_id: str, file_id: str, title: str, options: ProcessOptions):
-    """Pipeline assíncrono executado em segundo plano com suporte a faixas ativas múltiplas."""
-    job = JOBS[job_id]
+def _meeting_date(meeting: MeetingDetail) -> datetime:
     try:
-        raw_audio_path = settings.UPLOAD_DIR / file_id
-        if not raw_audio_path.exists():
-            raise FileNotFoundError(f"Arquivo {file_id} não encontrado.")
-
-        # Passo 1: Pré-processamento e análise de faixas de áudio
-        job.status = "preprocessing"
-        job.progress = 5
-        job.current_step = "Analisando faixas de áudio e convertendo (FFmpeg)..."
-        logger.info(f"[{job_id}] {job.current_step}")
-
-        active_tracks = AudioService.detect_active_audio_tracks(raw_audio_path)
-        logger.info(f"[{job_id}] Faixas ativas detectadas: {active_tracks}")
-
-        wav_filename = f"{Path(file_id).stem}_16k.wav"
-        processed_wav_path = settings.PROCESSED_DIR / wav_filename
-        # Gera o áudio mestre para reprodução no player web (com todas as faixas ativas combinadas)
-        wav_path, duration = AudioService.convert_to_wav_16k_mono(raw_audio_path, processed_wav_path, active_tracks=active_tracks)
-        duration_minutes = duration / 60.0
-
-        if len(active_tracks) > 1:
-            job.current_step = f"Processando gravação multi-faixa ({len(active_tracks)} faixas de áudio ativas)..."
-            logger.info(f"[{job_id}] {job.current_step}")
-
-            track_aligned_results = []
-            diarizer = DiarizationService(hf_token=options.hf_token)
-
-            for idx, track_no in enumerate(active_tracks):
-                track_step_base = 15 + int((idx / len(active_tracks)) * 55)
-                job.progress = track_step_base
-                job.current_step = f"Processando faixa {idx + 1}/{len(active_tracks)} (stream #{track_no})..."
-                logger.info(f"[{job_id}] {job.current_step}")
-
-                # Extrai a faixa individual para arquivo temporário de 16kHz
-                track_wav_filename = f"{Path(file_id).stem}_track_{track_no}_16k.wav"
-                track_wav_path = settings.PROCESSED_DIR / track_wav_filename
-                AudioService.extract_track_to_wav_16k(raw_audio_path, track_no, track_wav_path)
-
-                # Diarização da faixa individual
-                # Em arquivos multi-faixa, não forçamos min_speakers alto em canais individuais
-                # permitindo que um microfone permaneça como 1 orador único (k=1)
-                track_diar_segments = diarizer.diarize(
-                    audio_path=track_wav_path,
-                    min_speakers=None,
-                    max_speakers=options.max_speakers
-                )
-
-                # Transcrição da faixa individual
-                def on_track_progress(current_sec: float, total_sec: float, t_idx=idx, base=track_step_base):
-                    if total_sec > 0:
-                        pct = min(99, int((current_sec / total_sec) * 100))
-                        progress_increment = int((pct / 100) * (55 / len(active_tracks)))
-                        job.progress = min(70, base + progress_increment)
-                        job.current_step = f"Transcrevendo faixa {t_idx + 1}/{len(active_tracks)}: {pct}% ({current_sec/60:.1f}/{total_sec/60:.1f} min)..."
-
-                track_transcription = TranscriptionService.transcribe(
-                    audio_path=track_wav_path,
-                    model_size=options.whisper_model,
-                    language=options.language,
-                    progress_callback=on_track_progress
-                )
-
-                # Alinha a transcrição da faixa com sua diarização
-                track_aligned = align_transcription_with_diarization(
-                    transcription_segments=track_transcription,
-                    diarization_segments=track_diar_segments
-                )
-                track_aligned_results.append(track_aligned)
-
-            # Combina e intercala cronologicamente as faixas
-            job.status = "aligning"
-            job.progress = 75
-            job.current_step = "Sincronizando e intercalando faixas de áudio..."
-            logger.info(f"[{job_id}] {job.current_step}")
-
-            aligned_segments = merge_multitrack_segments(track_aligned_results)
-
-        else:
-            # Fluxo padrão de faixa única
-            job.status = "diarizing"
-            job.progress = 30
-            job.current_step = "Identificando e separando locutores (Diarização Local)..."
-            logger.info(f"[{job_id}] {job.current_step}")
-
-            diarizer = DiarizationService(hf_token=options.hf_token)
-            diarization_segments = diarizer.diarize(
-                audio_path=wav_path,
-                min_speakers=options.min_speakers,
-                max_speakers=options.max_speakers
-            )
-
-            job.status = "transcribing"
-            job.progress = 35
-            job.current_step = f"Transcrevendo fala em Português (Faster-Whisper '{options.whisper_model}')..."
-            logger.info(f"[{job_id}] {job.current_step}")
-
-            def on_transcribe_progress(current_sec: float, total_sec: float):
-                if total_sec > 0:
-                    pct = min(99, int((current_sec / total_sec) * 100))
-                    job.progress = 35 + int((pct / 100) * 35)
-                    job.current_step = f"Transcrevendo: {pct}% ({current_sec/60:.1f}/{total_sec/60:.1f} min)..."
-
-            transcription_raw = TranscriptionService.transcribe(
-                audio_path=wav_path,
-                model_size=options.whisper_model,
-                language=options.language,
-                progress_callback=on_transcribe_progress
-            )
-
-            job.status = "aligning"
-            job.progress = 75
-            job.current_step = "Sincronizando falas e oradores..."
-            logger.info(f"[{job_id}] {job.current_step}")
-
-            aligned_segments = align_transcription_with_diarization(
-                transcription_segments=transcription_raw,
-                diarization_segments=diarization_segments
-            )
-
-        # Passo 5: Geração da Ata de Reunião com Ollama Local
-        job.status = "summarizing"
-        job.progress = 85
-        job.current_step = "Gerando Ata Executiva com IA Local (Ollama)..."
-        logger.info(f"[{job_id}] {job.current_step}")
-
-        meeting_id = str(uuid.uuid4())
-        summary = await SummarizerService.generate_minutes(
-            segments=aligned_segments,
-            title=title or f"Reunião {datetime.now().strftime('%d/%m/%Y')}",
-            model_name=options.ollama_model,
-            custom_prompt=options.custom_prompt,
-            duration_minutes=duration_minutes
-        )
-
-        # Mapeamento inicial de locutores
-        unique_speakers = sorted(list(set(s.speaker for s in aligned_segments)))
-        speaker_map = {s: s for s in unique_speakers}
-
-        # Aplicar sugestões de nomes reais inferidos pelo Ollama se houver alta confiança
-        if summary and hasattr(summary, "suggested_speakers") and summary.suggested_speakers:
-            for spk_id, real_name in summary.suggested_speakers.items():
-                real_name_clean = str(real_name).strip()
-                if spk_id in speaker_map and real_name_clean and real_name_clean != spk_id:
-                    logger.info(f"[{job_id}] Nome real inferido: '{spk_id}' -> '{real_name_clean}'")
-                    speaker_map[spk_id] = real_name_clean
-            # Sincronizar os identificadores dos segmentos
-            for seg in aligned_segments:
-                if seg.speaker in speaker_map:
-                    seg.speaker = speaker_map[seg.speaker]
-
-        meeting_detail = MeetingDetail(
-            id=meeting_id,
-            title=title or summary.title,
-            created_at=datetime.now().strftime("%d/%m/%Y %H:%M"),
-            audio_filename=wav_filename,
-            audio_duration=duration,
-            audio_url=f"/api/audio/{wav_filename}",
-            segments=aligned_segments,
-            summary=summary,
-            speaker_map=speaker_map
-        )
-
-        # Salvar no banco SQLite
-        database.save_meeting(meeting_detail)
-
-        job.status = "completed"
-        job.progress = 100
-        job.current_step = "Processamento concluído com sucesso!"
-        job.meeting_id = meeting_id
-        job.result = meeting_detail
-        logger.info(f"[{job_id}] Reunião processada e salva com ID: {meeting_id}")
-
-    except Exception as e:
-        logger.exception(f"Erro durante processamento do job {job_id}: {e}")
-        job.status = "failed"
-        job.progress = 100
-        job.error = str(e)
-        job.current_step = f"Falha no processamento: {str(e)}"
+        return datetime.fromisoformat(meeting.created_at)
+    except ValueError:
+        return datetime.now().astimezone()
 
 
-# Rotas de Upload e Processamento
+async def _regenerate(meeting: MeetingDetail, minutes: MinutesGenerator, model: Optional[str],
+                      custom_prompt: Optional[str] = None) -> None:
+    meeting.summary = await minutes.generate(MinutesRequest(
+        segments=meeting.segments,
+        title=meeting.title,
+        duration_minutes=meeting.audio_duration / 60.0,
+        meeting_date=_meeting_date(meeting),
+        context=meeting.context,
+        speaker_map=meeting.speaker_map,
+        speaker_name_sources=meeting.speaker_name_sources,
+        model=model,
+        custom_prompt=custom_prompt,
+    ))
+    apply_speaker_suggestions(meeting)
+
+
+# ----------------------------------------------------------------------------
+# Upload e processamento
+# ----------------------------------------------------------------------------
 @app.post("/api/upload")
-async def upload_audio(file: UploadFile = File(...)):
-    """Recebe o arquivo de áudio gravado ou carregado e armazena localmente."""
+async def upload_audio(file: UploadFile = File(...), files: FileStore = Depends(get_file_store)):
+    """Recebe o arquivo em streaming (sem carregar tudo na memória) e armazena localmente."""
     try:
-        content = await file.read()
-        max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
-        if len(content) > max_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Arquivo excede o limite máximo permitido de {settings.MAX_FILE_SIZE_MB}MB."
-            )
+        file_id, size = await files.save_upload(file)
+    except FileTooLargeError as e:
+        raise HTTPException(status_code=413, detail=str(e))
+    except InvalidFileError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-        file_ext = Path(file.filename).suffix or ".wav"
-        file_id = f"{uuid.uuid4()}{file_ext}"
-        destination = settings.UPLOAD_DIR / file_id
-
-        with open(destination, "wb") as buffer:
-            buffer.write(content)
-
-        info = AudioService.get_audio_info(destination)
-
-        return {
-            "file_id": file_id,
-            "original_name": file.filename,
-            "duration": info.get("duration", 0.0),
-            "size_bytes": len(content)
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Erro no upload de arquivo: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    info = await asyncio.to_thread(AudioService.get_audio_info, files.upload_path(file_id))
+    return {"file_id": file_id, "original_name": file.filename, "duration": info.get("duration", 0.0), "size_bytes": size}
 
 
 @app.post("/api/process")
@@ -280,293 +119,267 @@ async def start_processing(
     background_tasks: BackgroundTasks,
     file_id: str = Form(...),
     title: str = Form("Reunião"),
-    whisper_model: str = Form("small"),
+    whisper_model: Optional[str] = Form(None),
     language: str = Form("pt"),
     ollama_model: Optional[str] = Form(None),
     min_speakers: Optional[int] = Form(None),
     max_speakers: Optional[int] = Form(None),
     custom_prompt: Optional[str] = Form(None),
-    hf_token: Optional[str] = Form(None)
+    hf_token: Optional[str] = Form(None),
+    objective: Optional[str] = Form(None),
+    meeting_type: str = Form("geral"),
+    participants: Optional[str] = Form(None),
+    glossary: Optional[str] = Form(None),
+    files: FileStore = Depends(get_file_store),
+    jobs: JobRegistry = Depends(get_jobs),
+    pipeline: MeetingPipeline = Depends(get_pipeline),
 ):
     """Inicia a esteira completa de diarização, transcrição e geração de ata."""
-    job_id = str(uuid.uuid4())
-    options = ProcessOptions(
-        whisper_model=whisper_model,
-        language=language,
-        ollama_model=ollama_model,
-        min_speakers=min_speakers,
-        max_speakers=max_speakers,
-        custom_prompt=custom_prompt,
-        hf_token=hf_token
-    )
+    try:
+        files.upload_path(file_id)  # valida antes de enfileirar
+    except InvalidFileError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
-    job = JobStatus(
-        job_id=job_id,
-        status="queued",
-        progress=0,
-        current_step="Na fila para processamento..."
-    )
-    JOBS[job_id] = job
+    try:
+        options = ProcessOptions(
+            whisper_model=whisper_model or settings.WHISPER_MODEL_SIZE,
+            language=language,
+            ollama_model=ollama_model,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            hf_token=hf_token,
+            context=MeetingContext(
+                objective=(objective or "").strip() or None,
+                meeting_type=meeting_type,
+                participants=participants,
+                glossary=glossary,
+                custom_prompt=(custom_prompt or "").strip() or None,
+            ),
+        )
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=json.loads(e.json()))
 
-    background_tasks.add_task(run_pipeline_task, job_id, file_id, title, options)
-    return {"job_id": job_id, "status": "queued"}
+    job = jobs.create()
+    background_tasks.add_task(pipeline.run, job.job_id, file_id, title, options)
+    return {"job_id": job.job_id, "status": job.status}
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobStatus)
-async def get_job_status(job_id: str):
-    """Consulta o status atual de uma tarefa em execução."""
-    if job_id not in JOBS:
+async def get_job_status(job_id: str, jobs: JobRegistry = Depends(get_jobs)):
+    job = jobs.get(job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
-    return JOBS[job_id]
+    return job
 
 
 @app.get("/api/jobs/{job_id}/stream")
-async def stream_job_status(job_id: str):
-    """Server-Sent Events (SSE) para atualização em tempo real do status na interface."""
-    if job_id not in JOBS:
+async def stream_job_status(job_id: str, jobs: JobRegistry = Depends(get_jobs)):
+    """Server-Sent Events (SSE): envia o estado apenas quando ele muda."""
+    if not jobs.get(job_id):
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
 
     async def event_generator():
+        last_seen = -1.0
         while True:
-            job = JOBS.get(job_id)
+            job = jobs.get(job_id)
             if not job:
                 break
-            data = job.model_dump_json()
-            yield f"data: {data}\n\n"
-            if job.status in ("completed", "failed"):
+            if job.updated_at != last_seen:
+                last_seen = job.updated_at
+                yield f"data: {job.model_dump_json()}\n\n"
+            else:
+                yield ": keep-alive\n\n"
+            if job.status in FINAL_STATES:
                 break
             await asyncio.sleep(1.0)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-# Rotas de Reuniões e Histórico
+# ----------------------------------------------------------------------------
+# Reuniões e histórico
+# ----------------------------------------------------------------------------
 @app.get("/api/meetings")
-async def list_meetings():
-    """Retorna o histórico de todas as reuniões salvas."""
-    return database.list_meetings()
+async def list_meetings(repo: MeetingRepository = Depends(get_repo)):
+    return repo.list()
 
 
 @app.get("/api/meetings/{meeting_id}")
-async def get_meeting(meeting_id: str):
-    """Obtém detalhes completos de uma reunião (diálogo com oradores e ata)."""
-    meeting = database.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Reunião não encontrada.")
-    return meeting
+async def get_meeting(meeting_id: str, repo: MeetingRepository = Depends(get_repo)):
+    return present_meeting(_load_meeting(repo, meeting_id))
 
 
 @app.delete("/api/meetings/{meeting_id}")
-async def delete_meeting(meeting_id: str):
-    """Remove uma reunião do histórico."""
-    success = database.delete_meeting(meeting_id)
-    if not success:
+async def delete_meeting(meeting_id: str, repo: MeetingRepository = Depends(get_repo)):
+    if not repo.delete(meeting_id):
         raise HTTPException(status_code=404, detail="Reunião não encontrada.")
     return {"deleted": True, "id": meeting_id}
 
 
 @app.put("/api/meetings/{meeting_id}/speakers")
-async def update_meeting_speakers(meeting_id: str, req: UpdateSpeakersRequest):
+async def update_meeting_speakers(
+    meeting_id: str,
+    req: UpdateSpeakersRequest,
+    repo: MeetingRepository = Depends(get_repo),
+    minutes: MinutesGenerator = Depends(get_minutes_generator),
+):
     """
-    Renomeia os interlocutores da reunião (ex: 'Locutor 1' -> 'Mariana').
-    Atualiza todos os segmentos e opcionalmente regera a ata com os nomes novos.
+    Renomeia locutores pelo ID estável (ex.: {"Locutor 1": "Mariana"}).
+    A ata e as exportações refletem o novo nome imediatamente, sem regerar via LLM.
     """
-    meeting = database.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Reunião não encontrada.")
+    meeting = _load_meeting(repo, meeting_id)
+    ids = set(meeting.speaker_ids())
+    by_display = {meeting.display_name(sid): sid for sid in ids}
 
-    # Atualiza o mapa e os segmentos
-    meeting.speaker_map.update(req.speaker_map)
-    for seg in meeting.segments:
-        if seg.speaker in req.speaker_map:
-            seg.speaker = req.speaker_map[seg.speaker]
+    for key, new_name in req.speaker_map.items():
+        sid = key if key in ids else by_display.get(key)  # aceita o nome atual por compatibilidade
+        if not sid:
+            raise HTTPException(status_code=400, detail=f"Locutor '{key}' não existe nesta reunião.")
+        new_name = (new_name or "").strip()
+        if new_name and new_name != sid:
+            if new_name != meeting.speaker_map.get(sid):
+                meeting.speaker_name_sources[sid] = "user"
+            meeting.speaker_map[sid] = new_name
+        else:
+            meeting.speaker_map[sid] = sid
+            meeting.speaker_name_sources[sid] = "default"
+    sync_display_names(meeting)
 
-    # Se solicitado, regera a ata com os novos nomes
     if req.regenerate_summary:
-        summary = await SummarizerService.generate_minutes(
-            segments=meeting.segments,
-            title=meeting.title,
-            model_name=req.ollama_model,
-            duration_minutes=meeting.audio_duration / 60.0
-        )
-        meeting.summary = summary
-    elif meeting.summary:
-        # Atualiza apenas a lista de participantes na ata existente
-        meeting.summary.participants = sorted(list(set(s.speaker for s in meeting.segments)))
+        await _regenerate(meeting, minutes, req.ollama_model)
 
-    database.save_meeting(meeting)
-    return meeting
+    repo.save(meeting)
+    return present_meeting(meeting)
 
 
 @app.post("/api/meetings/{meeting_id}/regenerate-summary")
-async def regenerate_summary(meeting_id: str, req: RegenerateSummaryRequest):
-    """Regera a Ata de Reunião com outro modelo do Ollama ou prompt customizado."""
-    meeting = database.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Reunião não encontrada.")
-
-    summary = await SummarizerService.generate_minutes(
-        segments=meeting.segments,
-        title=meeting.title,
-        model_name=req.ollama_model,
-        custom_prompt=req.custom_prompt,
-        duration_minutes=meeting.audio_duration / 60.0
-    )
-    meeting.summary = summary
-    database.save_meeting(meeting)
-    return meeting
+async def regenerate_summary(
+    meeting_id: str,
+    req: RegenerateSummaryRequest,
+    repo: MeetingRepository = Depends(get_repo),
+    minutes: MinutesGenerator = Depends(get_minutes_generator),
+):
+    meeting = _load_meeting(repo, meeting_id)
+    await _regenerate(meeting, minutes, req.ollama_model, req.custom_prompt)
+    repo.save(meeting)
+    return present_meeting(meeting)
 
 
-# Rotas de Exportação
+# ----------------------------------------------------------------------------
+# Exportação
+# ----------------------------------------------------------------------------
+def _safe_title(title: str) -> str:
+    return "".join(c for c in title if c.isalnum() or c in (" ", "_", "-")).strip() or "Reuniao"
+
+
 @app.get("/api/meetings/{meeting_id}/export/{format}")
-async def export_meeting(meeting_id: str, format: str):
+async def export_meeting(meeting_id: str, format: str, repo: MeetingRepository = Depends(get_repo)):
     """Exporta a ata para Markdown (.md), Word (.docx) ou Texto (.txt)."""
-    meeting = database.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Reunião não encontrada.")
-
-    safe_title = "".join(c for c in meeting.title if c.isalnum() or c in (" ", "_", "-")).strip()
-    filename_base = f"Ata_{safe_title}_{datetime.now().strftime('%Y%m%d')}"
+    meeting = present_meeting(_load_meeting(repo, meeting_id))
+    filename_base = f"Ata_{_safe_title(meeting.title)}_{datetime.now().strftime('%Y%m%d')}"
 
     if format == "md":
-        content = ExporterService.to_markdown(meeting)
-        return Response(
-            content=content,
-            media_type="text/markdown; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{filename_base}.md"'}
-        )
-    elif format == "txt":
-        content = ExporterService.to_plain_text(meeting)
-        return Response(
-            content=content,
-            media_type="text/plain; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{filename_base}.txt"'}
-        )
-    elif format == "docx":
-        stream = ExporterService.to_docx_bytes(meeting)
+        return Response(content=ExporterService.to_markdown(meeting), media_type="text/markdown; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{filename_base}.md"'})
+    if format == "txt":
+        return Response(content=ExporterService.to_plain_text(meeting), media_type="text/plain; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{filename_base}.txt"'})
+    if format == "docx":
         return StreamingResponse(
-            stream,
+            ExporterService.to_docx_bytes(meeting),
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="{filename_base}.docx"'}
-        )
-    else:
-        raise HTTPException(status_code=400, detail=f"Formato '{format}' não suportado (use 'md', 'docx' ou 'txt').")
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.docx"'})
+    raise HTTPException(status_code=400, detail=f"Formato '{format}' não suportado (use 'md', 'docx' ou 'txt').")
 
 
 @app.get("/api/meetings/{meeting_id}/export-transcript/{format}")
-async def export_meeting_transcript(meeting_id: str, format: str):
-    """Exporta a transcrição da reunião para Markdown (.md), Word (.docx), Texto (.txt) ou Legenda (.srt)."""
-    meeting = database.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Reunião não encontrada.")
-
+async def export_meeting_transcript(meeting_id: str, format: str, repo: MeetingRepository = Depends(get_repo)):
+    """Exporta a transcrição para Markdown (.md), Word (.docx), Texto (.txt) ou Legenda (.srt)."""
+    meeting = present_meeting(_load_meeting(repo, meeting_id))
     if not meeting.segments:
         raise HTTPException(status_code=400, detail="Reunião não possui transcrição disponível.")
-
-    safe_title = "".join(c for c in meeting.title if c.isalnum() or c in (" ", "_", "-")).strip()
-    filename_base = f"Transcricao_{safe_title}_{datetime.now().strftime('%Y%m%d')}"
+    filename_base = f"Transcricao_{_safe_title(meeting.title)}_{datetime.now().strftime('%Y%m%d')}"
 
     if format == "md":
-        content = ExporterService.transcript_to_markdown(meeting)
-        return Response(
-            content=content,
-            media_type="text/markdown; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{filename_base}.md"'}
-        )
-    elif format == "txt":
-        content = ExporterService.transcript_to_plain_text(meeting)
-        return Response(
-            content=content,
-            media_type="text/plain; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{filename_base}.txt"'}
-        )
-    elif format == "docx":
-        stream = ExporterService.transcript_to_docx_bytes(meeting)
+        return Response(content=ExporterService.transcript_to_markdown(meeting), media_type="text/markdown; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{filename_base}.md"'})
+    if format == "txt":
+        return Response(content=ExporterService.transcript_to_plain_text(meeting), media_type="text/plain; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{filename_base}.txt"'})
+    if format == "docx":
         return StreamingResponse(
-            stream,
+            ExporterService.transcript_to_docx_bytes(meeting),
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="{filename_base}.docx"'}
-        )
-    elif format == "srt":
-        content = ExporterService.transcript_to_srt(meeting)
-        return Response(
-            content=content,
-            media_type="text/plain; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{filename_base}.srt"'}
-        )
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Formato '{format}' não suportado para transcrição (use 'md', 'docx', 'txt' ou 'srt')."
-        )
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.docx"'})
+    if format == "srt":
+        return Response(content=ExporterService.transcript_to_srt(meeting), media_type="text/plain; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{filename_base}.srt"'})
+    raise HTTPException(status_code=400,
+                        detail=f"Formato '{format}' não suportado para transcrição (use 'md', 'docx', 'txt' ou 'srt').")
 
 
-
-# Áudio Estático para Player Interativo
+# ----------------------------------------------------------------------------
+# Áudio para o player
+# ----------------------------------------------------------------------------
 @app.get("/api/audio/{filename}")
-async def serve_audio(filename: str):
-    """Transmite o arquivo de áudio para o player da página web."""
-    path = settings.PROCESSED_DIR / filename
-    if not path.exists():
-        path = settings.UPLOAD_DIR / filename
-    if not path.exists():
+async def serve_audio(filename: str, files: FileStore = Depends(get_file_store)):
+    try:
+        path = files.audio_path(filename)
+    except InvalidFileError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Arquivo de áudio não encontrado.")
     return FileResponse(path, media_type="audio/wav")
 
 
-# Rotas de Modelos e Diagnóstico
+# ----------------------------------------------------------------------------
+# Modelos e diagnóstico
+# ----------------------------------------------------------------------------
 @app.get("/api/models/whisper")
 async def list_whisper_models():
-    """Modelos de transcrição Faster-Whisper recomendados."""
     return [
         {"id": "tiny", "name": "Tiny (Mais rápido, 39M params)", "recommended_for": "Testes rápidos"},
         {"id": "base", "name": "Base (Equilibrado e leve, 74M params)", "recommended_for": "CPUs comuns"},
-        {"id": "small", "name": "Small (Recomendado para PT-BR, 244M params)", "recommended_for": "Excelente precisão / velocidade"},
-        {"id": "medium", "name": "Medium (Alta precisão, 769M params)", "recommended_for": "Reuniões complexas / Termos técnicos"},
-        {"id": "large-v3", "name": "Large v3 (Precisão máxima, 1550M params)", "recommended_for": "Uso com GPU ou servidores dedicados"}
+        {"id": "small", "name": "Small (244M params)", "recommended_for": "Boa precisão / velocidade"},
+        {"id": "medium", "name": "Medium (Recomendado para PT-BR, 769M params)", "recommended_for": "Reuniões complexas / termos técnicos"},
+        {"id": "large-v3", "name": "Large v3 (Precisão máxima, 1550M params)", "recommended_for": "Uso com GPU"},
     ]
 
 
 @app.get("/api/models/ollama")
-async def list_ollama_models():
-    """Busca dinâmica dos modelos instalados no Ollama."""
-    models = await SummarizerService.get_available_ollama_models()
-    return {
-        "ollama_url": settings.OLLAMA_BASE_URL,
-        "available_models": models,
-        "connected": len(models) > 0
-    }
+async def list_ollama_models(llm: OllamaClient = Depends(get_llm_client)):
+    models = await llm.list_models()
+    return {"ollama_url": settings.OLLAMA_BASE_URL, "available_models": models, "connected": len(models) > 0}
 
 
 @app.post("/api/models/ollama/pull")
-async def pull_ollama_model(payload: dict):
-    """Baixa um modelo diretamente no Ollama."""
+async def pull_ollama_model(payload: dict, llm: OllamaClient = Depends(get_llm_client)):
     model_name = payload.get("model_name")
     if not model_name:
         raise HTTPException(status_code=400, detail="Nome do modelo não informado.")
     try:
-        res = await SummarizerService.pull_model(model_name)
+        res = await llm.pull_model(model_name)
         return {"status": "success", "model": model_name, "detail": res}
     except Exception as e:
-        logger.error(f"Erro ao baixar modelo {model_name}: {e}")
-        raise HTTPException(status_code=400, detail=f"Falha ao baixar modelo '{model_name}': {str(e)}")
+        logger.error("Erro ao baixar modelo %s: %s", model_name, e)
+        raise HTTPException(status_code=400, detail=f"Falha ao baixar modelo '{model_name}': {e}")
 
 
 @app.get("/api/health")
-async def health_check():
-    """Checagem geral de saúde dos serviços."""
-    ollama_models = await SummarizerService.get_available_ollama_models()
+async def health_check(llm: OllamaClient = Depends(get_llm_client)):
+    ollama_models = await llm.list_models()
     return {
         "status": "online",
         "version": settings.APP_VERSION,
         "whisper_device": settings.WHISPER_DEVICE,
         "ollama_connected": len(ollama_models) > 0,
         "ollama_url": settings.OLLAMA_BASE_URL,
-        "ollama_models_count": len(ollama_models)
+        "ollama_models_count": len(ollama_models),
     }
 
 
-# Montar frontend estático
-FRONTEND_DIR = getattr(settings, "FRONTEND_DIR", Path(__file__).resolve().parent.parent / "frontend")
-if FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+# Frontend estático
+if settings.FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(settings.FRONTEND_DIR), html=True), name="frontend")

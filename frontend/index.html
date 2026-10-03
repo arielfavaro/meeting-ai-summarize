@@ -176,6 +176,44 @@
           </div>
         </div>
 
+        <!-- Contexto da reunião: melhora a ata (objetivos) e a transcrição (nomes e termos) -->
+        <div class="form-grid-3">
+          <div class="form-group" style="grid-column: span 2;">
+            <label class="form-label" for="input-meeting-objective">Objetivo / Pauta (Opcional)</label>
+            <textarea id="input-meeting-objective" class="form-textarea" rows="2" placeholder="Ex: Decidir a data do go-live; revisar riscos da migração; definir responsáveis pelos testes."></textarea>
+            <span class="form-hint">A IA avalia se cada objetivo foi atingido, parcial ou não atingido.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="select-meeting-type">Tipo de Reunião</label>
+            <select id="select-meeting-type" class="form-select">
+              <option value="geral" selected>Geral</option>
+              <option value="daily">Daily / Stand-up</option>
+              <option value="planejamento">Planejamento</option>
+              <option value="retrospectiva">Retrospectiva</option>
+              <option value="one_on_one">1:1</option>
+              <option value="comercial">Comercial / Cliente</option>
+              <option value="tecnica">Técnica / Arquitetura</option>
+              <option value="status_report">Status Report</option>
+              <option value="entrevista">Entrevista</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-grid-3">
+          <div class="form-group" style="grid-column: span 2;">
+            <label class="form-label" for="input-participants">Participantes Esperados (Opcional)</label>
+            <input type="text" id="input-participants" class="form-input" placeholder="Ex: Ariel, Mariana, Carlos">
+            <span class="form-hint">Separados por vírgula. Melhora a grafia dos nomes na transcrição e a identificação dos locutores.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="input-glossary">Glossário (Opcional)</label>
+            <input type="text" id="input-glossary" class="form-input" placeholder="Ex: Kubernetes, OKR, SAP, NPS">
+            <span class="form-hint">Siglas, produtos e termos técnicos.</span>
+          </div>
+        </div>
+
         <div style="margin-top: 1rem;">
           <button class="btn btn-primary btn-lg" id="btn-start-process" onclick="app.startProcessing()">
             🚀 Iniciar Transcrição, Separação de Pessoas e Geração de Ata
@@ -267,6 +305,15 @@
         </div>
       </div>
 
+      <!-- Avisos de qualidade da ata (contingência, itens sem evidência...) -->
+      <div id="minutes-warnings" class="warnings-container"></div>
+
+      <!-- Objetivos da reunião e status -->
+      <div class="card" id="card-objectives" style="display: none; margin-bottom: 1.5rem;">
+        <h3 class="card-title">🎯 Objetivos da Reunião</h3>
+        <ul class="objectives-list" id="minutes-objectives-list"></ul>
+      </div>
+
       <!-- Resumo Executivo e Decisões -->
       <div class="summary-card-grid">
         <div class="card summary-highlight">
@@ -322,6 +369,12 @@
       <div class="card" id="card-open-points" style="display: none;">
         <h3 class="card-title">❓ Pontos em Aberto / Próximos Passos</h3>
         <ul id="minutes-open-points-list" style="margin-top: 0.75rem; padding-left: 1.25rem; color: #cbd5e1;"></ul>
+      </div>
+
+      <!-- Riscos e Impedimentos -->
+      <div class="card" id="card-risks" style="display: none; margin-top: 1.5rem;">
+        <h3 class="card-title">🚩 Riscos e Impedimentos</h3>
+        <ul id="minutes-risks-list" style="margin-top: 0.75rem; padding-left: 1.25rem; color: #cbd5e1;"></ul>
       </div>
     </section>
 
@@ -408,6 +461,7 @@
         <div class="speakers-list-inputs" id="speakers-inputs-container">
           <!-- Dinâmico -->
         </div>
+        <div class="speaker-suggestions" id="speaker-suggestions-container"></div>
       </div>
 
       <!-- Barra de Busca de Trecho de Fala -->

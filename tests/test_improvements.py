@@ -1,11 +1,21 @@
-import numpy as np
-from pathlib import Path
-from backend.services.diarization import DiarizationService
-from backend.services.transcription import TranscriptionService
-from backend.services.alignment import align_transcription_with_diarization, merge_multitrack_segments
-from backend.services.summarizer import SummarizerService
-from backend.config import settings
+import _env  # noqa: F401  (ambiente isolado)
 
+import importlib.util
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import numpy as np
+
+from backend.services.diarization import DiarizationService
+from backend.services.alignment import align_transcription_with_diarization, merge_multitrack_segments
+from backend.services.minutes.generator import MinutesConfig, MinutesGenerator
+from backend.services.transcription import build_initial_prompt
+
+HAS_FASTER_WHISPER = importlib.util.find_spec("faster_whisper") is not None and importlib.util.find_spec("librosa") is not None
+
+
+@unittest.skipUnless(HAS_FASTER_WHISPER, "faster-whisper/librosa não instalados")
 def test_silero_vad():
     print("=== TEST 1: Silero VAD speech detection ===")
     diarizer = DiarizationService()
@@ -70,22 +80,57 @@ def test_multitrack_merge():
 
 def test_adaptive_num_ctx():
     print("=== TEST 4: Adaptive num_ctx calculation ===")
-    dialogue_short = "Locutor 1: Oi\nLocutor 2: Olá"
-    est_short = int(len(dialogue_short) / 2.8) + 2500
-    ctx_short = min(settings.OLLAMA_NUM_CTX, max(4096, est_short))
-    print(f"Short dialogue context: {ctx_short} tokens")
-    assert ctx_short == 4096
+    gen = MinutesGenerator(llm=None, config=MinutesConfig(default_model="x", max_ctx=32768, num_predict=4096))
+    short = [{"role": "user", "content": "Locutor 1: Oi\nLocutor 2: Olá"}]
+    assert gen._num_ctx_for(short, 0) == 4096           # piso mínimo
+    assert 4096 <= gen._num_ctx_for(short, 4096) < 4300  # prompt curto + espaço para a resposta
+    long = [{"role": "user", "content": "Locutor 1: Teste longo de reunião com argumentos corporativos " * 2500}]
+    ctx_long = gen._num_ctx_for(long, 4096)
+    print(f"Long dialogue context: {ctx_long} tokens")
+    assert 4096 < ctx_long <= 32768
 
-    dialogue_long = "Locutor 1: Teste longo de reunião com argumentos corporativos " * 2500
-    est_long = int(len(dialogue_long) / 2.8) + 2500
-    ctx_long = min(settings.OLLAMA_NUM_CTX, max(4096, est_long))
-    print(f"Long dialogue context: {ctx_long} tokens (configurado: {settings.OLLAMA_NUM_CTX})")
-    assert ctx_long > 4096
-    assert ctx_long <= settings.OLLAMA_NUM_CTX
+
+def test_diarization_falls_back_to_local_engine():
+    """Antes, uma falha do SpeechBrain fazia diarize() retornar None (tudo virava 'Locutor 1')."""
+    print("=== TEST 5: Diarization fallback chain ===")
+    diarizer = DiarizationService()
+    expected = [{"start": 0.0, "end": 1.0, "speaker": "Locutor 1"}, {"start": 1.0, "end": 2.0, "speaker": "Locutor 2"}]
+    with mock.patch.object(diarizer, "_diarize_speechbrain", side_effect=RuntimeError("sem speechbrain")), \
+         mock.patch.object(diarizer, "_diarize_local", return_value=expected) as local:
+        result = diarizer.diarize(Path("qualquer.wav"))
+    assert result == expected
+    local.assert_called_once()
+
+
+def test_whisper_initial_prompt_includes_context_terms():
+    print("=== TEST 6: Whisper initial prompt ===")
+    prompt = build_initial_prompt("pt", ["Ariel", "Mariana", "Kubernetes", "Ariel"])
+    assert "Vocabulário: Ariel, Mariana, Kubernetes." in prompt
+    assert len(build_initial_prompt("pt", ["termo"] * 500)) <= 600
+
+
+class TestImprovements(unittest.TestCase):
+    """Permite rodar via `python -m unittest discover tests`."""
+
+    @unittest.skipUnless(HAS_FASTER_WHISPER, "faster-whisper/librosa não instalados")
+    def test_silero_vad(self):
+        test_silero_vad()
+
+    def test_word_level_alignment(self):
+        test_word_level_alignment()
+
+    def test_multitrack_merge(self):
+        test_multitrack_merge()
+
+    def test_adaptive_num_ctx(self):
+        test_adaptive_num_ctx()
+
+    def test_diarization_fallback(self):
+        test_diarization_falls_back_to_local_engine()
+
+    def test_whisper_prompt(self):
+        test_whisper_initial_prompt_includes_context_terms()
+
 
 if __name__ == "__main__":
-    test_silero_vad()
-    test_word_level_alignment()
-    test_multitrack_merge()
-    test_adaptive_num_ctx()
-    print(">>> ALL 4 TESTS PASSED FLAWLESSLY! <<<")
+    unittest.main()

@@ -1,20 +1,41 @@
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Sequence
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
+
+BASE_PROMPT_PT = (
+    "Transcrição de reunião corporativa e técnica em português brasileiro, com pontuação correta, "
+    "termos de negócios e acentuação adequada."
+)
+# O Whisper usa no máximo ~224 tokens de prompt; mantemos folga.
+MAX_PROMPT_CHARS = 600
+
+
+def build_initial_prompt(language: str, terms: Optional[Sequence[str]] = None) -> Optional[str]:
+    """
+    Monta o `initial_prompt` do Whisper com nomes de participantes e termos do glossário,
+    o que melhora a grafia de nomes próprios, siglas e produtos.
+    """
+    base = BASE_PROMPT_PT if language == "pt" else ""
+    terms = [t.strip() for t in (terms or []) if t and t.strip()]
+    if terms:
+        vocab = "Vocabulário: " + ", ".join(dict.fromkeys(terms)) + "."
+        base = f"{base} {vocab}".strip()
+    return base[:MAX_PROMPT_CHARS] or None
 
 
 class TranscriptionService:
     _models: Dict[str, Any] = {}
 
     @classmethod
-    def get_model(cls, model_size: str = "small", device: Optional[str] = None, compute_type: Optional[str] = None):
+    def get_model(cls, model_size: Optional[str] = None, device: Optional[str] = None, compute_type: Optional[str] = None):
         """
         Carrega ou reutiliza instância do modelo Faster-Whisper.
         Prioriza SEMPRE o carregamento 100% OFFLINE do disco local (sem checagem de rede).
         """
+        model_size = model_size or settings.WHISPER_MODEL_SIZE
         device = device or settings.WHISPER_DEVICE
         compute_type = compute_type or settings.WHISPER_COMPUTE_TYPE
 
@@ -74,24 +95,22 @@ class TranscriptionService:
     def transcribe(
         cls,
         audio_path: Path,
-        model_size: str = "small",
+        model_size: Optional[str] = None,
         language: str = "pt",
         beam_size: int = 5,
-        progress_callback=None
+        progress_callback=None,
+        prompt_terms: Optional[Sequence[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Executa transcrição em áudio com detecção de idioma e timestamps.
         Retorna lista de segmentos com start, end e text.
         """
+        model_size = model_size or settings.WHISPER_MODEL_SIZE
         logger.info(f"Iniciando transcrição de {audio_path.name} com modelo {model_size} (idioma={language})...")
         model = cls.get_model(model_size=model_size)
 
-        # Prompt contextual para estabelecer pontuação, acentuação e vocabulário corporativo em PT-BR
-        initial_prompt = (
-            "Transcrição de reunião corporativa e técnica em português brasileiro, com pontuação correta, "
-            "termos de negócios e acentuação adequada."
-            if language == "pt" else None
-        )
+        # Prompt contextual: pontuação PT-BR + nomes dos participantes e glossário informados
+        initial_prompt = build_initial_prompt(language, prompt_terms)
 
         def _run_transcribe(m):
             segments, info = m.transcribe(

@@ -1,18 +1,20 @@
-import os
-import sys
-import unittest
+import _env  # noqa: F401  (ambiente isolado)
+
+import importlib.util
 import io
+import tempfile
+import unittest
 from pathlib import Path
 
-# Adicionar pasta raiz ao sys.path
-ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT_DIR))
-
+from _env import TEST_DATA_DIR
 from backend.models.schemas import SpeakerSegment, MeetingMinutes, MeetingDetail, TopicItem, ActionItem
 from backend.services.alignment import align_transcription_with_diarization
-from backend.services.summarizer import SummarizerService
 from backend.services.exporter import ExporterService
-from backend import database
+from backend.services.minutes.heuristic import generate_heuristic_minutes
+from backend.services.speakers import present_meeting
+from backend.database import MeetingRepository
+
+HAS_AUDIO_STACK = all(importlib.util.find_spec(m) for m in ("librosa", "sklearn", "soundfile"))
 
 
 class TestMeetingPipeline(unittest.TestCase):
@@ -38,7 +40,7 @@ class TestMeetingPipeline(unittest.TestCase):
                 )
             ],
             decisions=[
-                "Deploy em produção agendado para sexta-feira."
+                "Deploy em produção agendado para sexta-feira."  # formato legado (string) continua aceito
             ],
             action_items=[
                 ActionItem(
@@ -49,7 +51,6 @@ class TestMeetingPipeline(unittest.TestCase):
                 )
             ],
             open_points=[],
-            raw_markdown="# Ata de Teste"
         )
 
         self.meeting = MeetingDetail(
@@ -63,6 +64,7 @@ class TestMeetingPipeline(unittest.TestCase):
             summary=self.summary,
             speaker_map={"Locutor 1": "Locutor 1", "Locutor 2": "Locutor 2"}
         )
+        self.view = present_meeting(self.meeting)
 
     def test_alignment_logic(self):
         """Testa se a correspondência entre transcrição e diarização funciona corretamente."""
@@ -83,73 +85,75 @@ class TestMeetingPipeline(unittest.TestCase):
 
     def test_markdown_and_text_export(self):
         """Testa geração de exportações em Markdown e Texto."""
-        md = ExporterService.to_markdown(self.meeting)
+        md = ExporterService.to_markdown(self.view)
         self.assertIn("Transcrição Completa dos Diálogos", md)
         self.assertIn("Locutor 1", md)
 
-        txt = ExporterService.to_plain_text(self.meeting)
+        txt = ExporterService.to_plain_text(self.view)
         self.assertIn("ATA DE REUNIÃO", txt)
         self.assertIn("RESUMO EXECUTIVO", txt)
         self.assertIn("PLANO DE AÇÃO", txt)
 
     def test_docx_export(self):
         """Testa geração de arquivo DOCX em memória."""
-        docx_bytes = ExporterService.to_docx_bytes(self.meeting)
+        docx_bytes = ExporterService.to_docx_bytes(self.view)
         self.assertIsInstance(docx_bytes, io.BytesIO)
         self.assertGreater(docx_bytes.getbuffer().nbytes, 500)
 
     def test_transcript_exports(self):
         """Testa exportações específicas da transcrição em MD, TXT, DOCX e SRT."""
         # Markdown
-        md = ExporterService.transcript_to_markdown(self.meeting)
+        md = ExporterService.transcript_to_markdown(self.view)
         self.assertIn("# Transcrição:", md)
         self.assertIn("Diálogos Integrais", md)
         self.assertIn("[00:00] Locutor 1:", md)
 
         # Plain Text
-        txt = ExporterService.transcript_to_plain_text(self.meeting)
+        txt = ExporterService.transcript_to_plain_text(self.view)
         self.assertIn("TRANSCRIÇÃO DE REUNIÃO:", txt)
         self.assertIn("[00:00] Locutor 1:", txt)
 
         # DOCX
-        docx_stream = ExporterService.transcript_to_docx_bytes(self.meeting)
+        docx_stream = ExporterService.transcript_to_docx_bytes(self.view)
         self.assertIsInstance(docx_stream, io.BytesIO)
         self.assertGreater(docx_stream.getbuffer().nbytes, 500)
 
         # SRT
-        srt = ExporterService.transcript_to_srt(self.meeting)
+        srt = ExporterService.transcript_to_srt(self.view)
         self.assertIn("1\n00:00:00,000 --> 00:00:04,500\n[Locutor 1]", srt)
         self.assertIn("2\n00:00:05,000 --> 00:00:09,800\n[Locutor 2]", srt)
 
     def test_fallback_summarizer(self):
         """Testa gerador heurístico em PT-BR para situações sem LLM disponível."""
-        summary = SummarizerService._generate_fallback(
+        summary = generate_heuristic_minutes(
             segments=self.segments,
             title="Reunião Fallback",
-            participants=["Locutor 1", "Locutor 2"],
-            duration_minutes=0.33
+            duration_minutes=0.33,
+            meeting_date="2026-09-05T15:30:00",
         )
         self.assertEqual(summary.title, "Reunião Fallback")
+        self.assertEqual(summary.source, "heuristic")
         self.assertGreater(len(summary.action_items), 0)
-        self.assertIn("Ata de Reunião", summary.raw_markdown)
+        self.assertTrue(all(a.evidence for a in summary.action_items))
+        self.meeting.summary = summary
+        self.assertIn("Ata de Reunião", present_meeting(self.meeting).summary.raw_markdown)
 
     def test_database_persistence(self):
         """Testa inserção, busca e exclusão no banco SQLite."""
-        database.save_meeting(self.meeting)
-        retrieved = database.get_meeting(self.meeting.id)
+        repo = MeetingRepository(Path(tempfile.mkdtemp()) / "test.db")
+        repo.save(self.meeting)
+        retrieved = repo.get(self.meeting.id)
         self.assertIsNotNone(retrieved)
         self.assertEqual(retrieved.title, self.meeting.title)
         self.assertEqual(len(retrieved.segments), 4)
+        self.assertEqual(retrieved.summary.decisions[0].description, "Deploy em produção agendado para sexta-feira.")
 
-        # Testar listagem
-        all_meetings = database.list_meetings()
-        self.assertTrue(any(m.id == self.meeting.id for m in all_meetings))
+        self.assertTrue(any(m.id == self.meeting.id for m in repo.list()))
 
-        # Testar exclusão
-        database.delete_meeting(self.meeting.id)
-        deleted = database.get_meeting(self.meeting.id)
-        self.assertIsNone(deleted)
+        repo.delete(self.meeting.id)
+        self.assertIsNone(repo.get(self.meeting.id))
 
+    @unittest.skipUnless(HAS_AUDIO_STACK, "librosa/sklearn/soundfile não instalados")
     def test_local_diarization(self):
         """Testa motor de diarização 100% local e offline com áudio sintético."""
         import numpy as np
@@ -161,7 +165,7 @@ class TestMeetingPipeline(unittest.TestCase):
         y1 = 0.8 * np.sin(2 * np.pi * 150 * t[:sr*2])
         y2 = 0.8 * np.sin(2 * np.pi * 500 * t[sr*2:])
         y = np.concatenate([y1, y2])
-        test_wav = ROOT_DIR / "data" / "test_diar_synth.wav"
+        test_wav = TEST_DATA_DIR / "test_diar_synth.wav"
         sf.write(str(test_wav), y, sr)
 
         try:
@@ -175,6 +179,7 @@ class TestMeetingPipeline(unittest.TestCase):
             if test_wav.exists():
                 test_wav.unlink()
 
+    @unittest.skipUnless(HAS_AUDIO_STACK, "librosa/sklearn/soundfile não instalados")
     def test_local_diarization_four_speakers(self):
         """Testa separação de 4 interlocutores distintos com timbres e frequências diferentes."""
         import numpy as np
@@ -199,7 +204,7 @@ class TestMeetingPipeline(unittest.TestCase):
                 chunks.append(make_voice(p, 1.2))
 
         y = np.concatenate(chunks)
-        test_wav = ROOT_DIR / "data" / "test_diar_4spk.wav"
+        test_wav = TEST_DATA_DIR / "test_diar_4spk.wav"
         sf.write(str(test_wav), y, sr)
 
         try:

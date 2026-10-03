@@ -75,7 +75,7 @@ class SettingsManager {
     const originalText = btnElement ? btnElement.innerHTML : "";
     if (btnElement) {
       btnElement.disabled = true;
-      btnElement.innerHTML = `⏳ Baixando ${modelName}...`;
+      btnElement.textContent = `⏳ Baixando ${modelName}...`;
     }
     app.showToast(`Iniciando download de '${modelName}' no Ollama... Isso pode levar alguns minutos.`, 6000);
 

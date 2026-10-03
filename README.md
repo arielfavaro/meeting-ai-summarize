@@ -14,8 +14,8 @@
   - **Motor Neural SpeechBrain (ECAPA-TDNN):** Extração de assinaturas vocais densas de 192 dimensões aceleradas por GPU CUDA, sem requerer token ou cadastro no Hugging Face.
   - **Silero VAD Neural:** Detecção de fala humana profunda que descarta digitação, ar-condicionado e cliques.
   - **Suavização de Micro-Clusters:** Elimina locutores fantasmas causados por tosses ou interjeições rápidas.
-  - **Inferência Automática de Nomes Reais:** O Ollama infere e sugere os nomes reais dos participantes diretamente das saudações no diálogo (*"Oi Ariel"*, *"Com certeza, Carlos"*).
-  - **Renomeação e Reorganização:** Edite os nomes na interface com 1 clique e regere a ata a qualquer momento.
+  - **Inferência de Nomes com Evidência:** O LLM sugere nomes (auto-apresentação: *"aqui é a Mariana"*; ou chamado pelo nome: *"Carlos, pode falar?"* seguido da resposta do Carlos). As sugestões só são aplicadas após validação determinística (nome presente na transcrição, quem é chamado é quem responde, confiança mínima, nomes únicos). Sugestões fracas aparecem na interface para você confirmar.
+  - **IDs Estáveis de Locutor:** A transcrição e a ata guardam o rótulo (`Locutor 2`); os nomes são aplicados na exibição. Renomear atualiza transcrição, ata e exportações na hora, sem chamar o LLM, e nomes definidos por você nunca são sobrescritos pela IA.
 - **⚡ Transcrição Otimizada em Português (Faster-Whisper):**
   - Utiliza CTranslate2 com precisão `float16` na GPU CUDA ou `int8` na CPU.
   - **`initial_prompt` em PT-BR:** Pontuação, acentuação e termos técnicos corporativos refinados.
@@ -23,14 +23,18 @@
   - **Anti-Alucinação:** `condition_on_previous_text=False` e `hallucination_silence_threshold=2.0`, eliminando repetições em loop em reuniões longas.
 - **📋 Geração de Atas de Reunião com LLM Local (Ollama):**
   - Integração nativa com **Ollama** (`qwen2.5:14b`, `gemma4:12b`, `llama3.1:8b`, etc.).
-  - **Janela de Contexto Adaptativa (`OLLAMA_NUM_CTX`):** Dimensiona automaticamente a memória de 4.096 até 32.768+ tokens de acordo com o tamanho real da conversa, garantindo síntese completa de reuniões de até 2 horas e meia sem perda de conteúdo.
+  - **Contexto da Reunião:** Objetivo/pauta, tipo de reunião (daily, planejamento, retrospectiva, 1:1, comercial, técnica...), participantes esperados e glossário. Nomes e termos também alimentam o `initial_prompt` do Whisper.
+  - **Saída Estruturada (JSON Schema):** O esquema Pydantic é enviado no `format` do Ollama (geração restrita por gramática) e validado na volta, com nova tentativa informando o erro ao modelo.
+  - **Evidências:** Cada objetivo, decisão, tarefa e ponto em aberto aponta os trechos da transcrição (`#ID`) que o sustentam — clique no horário para ouvir. Itens sem evidência são sinalizados.
+  - **Janela de Contexto Adaptativa + Map-Reduce:** `num_ctx` é dimensionado pelo tamanho real do prompt; reuniões que não cabem em `OLLAMA_NUM_CTX` são analisadas em blocos com sobreposição e consolidadas numa ata única.
   - Produz Atas executivas completas:
+    - **Objetivos da Reunião** com status (atingido / parcial / não atingido).
     - **Resumo Executivo** estruturado.
     - **Tópicos Principais e Discussões** detalhadas.
     - **Decisões Tomadas** registradas formalmente.
-    - **Matriz de Ações / Tarefas:** Responsável, Ação, Prazo e Status.
-    - **Pontos em Aberto / Próximos Passos**.
-  - **Gerador Estruturado de Contingência:** Caso o modelo do Ollama ainda não tenha sido baixado, a ata é gerada por análise heurística local sem travar.
+    - **Matriz de Ações / Tarefas:** Responsável, Ação, Prazo (com data absoluta: *"sexta-feira"* → `09/10/2026`) e Status.
+    - **Pontos em Aberto / Próximos Passos** e **Riscos / Impedimentos**.
+  - **Gerador de Contingência Transparente:** Sem LLM disponível, a ata é gerada por palavras-chave e marcada como contingência na interface e nas exportações.
 - **📄 Exportação Profissional:**
   - Exportação em **Word (.docx)** com formatação corporativa e tabela de tarefas.
   - Exportação em **Markdown (.md)** com formatação GitHub.
@@ -56,16 +60,24 @@ meeting-ai-summarize/
 │
 ├── backend/                     # API FastAPI e Motores de IA
 │   ├── main.py                  # Endpoints REST e streaming SSE
-│   ├── config.py                # Configurações centralizadas
-│   ├── database.py              # Armazenamento SQLite local
-│   ├── models/schemas.py        # Validação com Pydantic
+│   ├── dependencies.py          # Composition root (injeção de dependências via Depends)
+│   ├── config.py                # Configurações centralizadas (pydantic-settings)
+│   ├── database.py              # Repositório SQLite com migrações versionadas
+│   ├── models/schemas.py        # Domínio e DTOs (Pydantic)
+│   ├── prompts/                 # Prompts versionados da ata (+ orientações por tipo de reunião)
 │   └── services/
+│       ├── pipeline.py          # Orquestração do processamento (não bloqueia o event loop)
+│       ├── jobs.py              # Registro de jobs com expiração e fila (semáforo)
+│       ├── file_store.py        # Upload em streaming e validação de caminhos
 │       ├── audio_service.py     # Conversão 16kHz mono com FFmpeg e amix multifaixa
 │       ├── transcription.py     # Faster-Whisper 100% offline (PT-BR)
-│       ├── diarization.py       # Motor de Diarização 100% Local (VAD + Biometria)
+│       ├── diarization.py       # Diarização local (Pyannote → SpeechBrain → acústico)
 │       ├── alignment.py         # Fusão fala x orador
-│       ├── summarizer.py        # Prompt engineering para Atas no Ollama
-│       └── exporter.py          # Gerador DOCX, Markdown e TXT
+│       ├── speakers.py          # IDs estáveis x nomes de exibição (apresentação)
+│       ├── exporter.py          # Gerador DOCX, Markdown e TXT
+│       ├── llm/                 # Contrato LLMClient + cliente Ollama
+│       └── minutes/             # Ata: gerador (single-pass/map-reduce), verificação,
+│                                #      prazos, nomes de locutores, renderização
 │
 ├── frontend/                    # Interface Web Moderna (SPA)
 │   ├── index.html               # Layout com abas, dropzone e player
@@ -76,8 +88,11 @@ meeting-ai-summarize/
 │       ├── recorder.js          # Gravador de microfone com Web Audio API
 │       └── settings.js          # Diagnóstico de conexão do Ollama
 │
-└── tests/                       # Testes de integração e validação
-    ├── test_audio_pipeline.py   # Testes automatizados do pipeline
+└── tests/                       # Testes (rodam sem modelos de IA, usando dublês)
+    ├── test_minutes.py          # Ata estruturada, map-reduce, retries, prazos, nomes
+    ├── test_api.py              # Segurança de arquivos, renomeação, migração de dados legados
+    ├── test_pipeline.py         # Pipeline ponta a ponta, fila e event loop
+    ├── test_audio_pipeline.py   # Alinhamento, exportações, diarização local
     └── generate_test_audio.py   # Gerador de áudio sintético WAV
 ```
 
@@ -158,11 +173,16 @@ Todas as opções do MeetingAI são configuradas centralizadamente via variávei
 | `OLLAMA_NUM_CTX` | `32768` | `4096` a `131072` | **Janela máxima de contexto do LLM em tokens.** Essencial para reuniões longas. |
 | `OLLAMA_MODEL` | `gemma4:12b` | `gemma4:12b`, `qwen2.5:14b`, `llama3.1:8b`, etc. | Modelo de LLM local utilizado para sumarizar e extrair a ata de reunião. |
 | `OLLAMA_BASE_URL` | `http://ollama:11434` | URL válida do Ollama | Endereço do serviço Ollama (no Docker ou host nativo). |
-| `WHISPER_MODEL_SIZE` | `large-v3` | `tiny`, `base`, `small`, `medium`, `large-v3` | Tamanho do modelo Whisper. `medium` e `large-v3` são recomendados para PT-BR. |
+| `WHISPER_MODEL_SIZE` | `medium` | `tiny`, `base`, `small`, `medium`, `large-v3` | Tamanho do modelo Whisper. `medium` e `large-v3` são recomendados para PT-BR. |
 | `WHISPER_DEVICE` | `cpu` (ou `cuda`) | `cpu`, `cuda` | Dispositivo de hardware para a transcrição. |
 | `WHISPER_COMPUTE_TYPE`| `int8` (ou `float16`)| `int8`, `float16`, `float32` | Precisão numérica: `float16` para GPU, `int8` para CPU. |
 | `DEFAULT_LANGUAGE` | `pt` | Código ISO (`pt`, `en`, `es`, `auto`) | Idioma padrão das reuniões. |
 | `MAX_FILE_SIZE_MB` | `500` | Inteiro (MB) | Limite de tamanho de arquivo aceito no upload. |
+| `OLLAMA_NUM_PREDICT` | `4096` | Inteiro | Tokens reservados para a resposta do LLM (a ata em JSON). |
+| `MINUTES_CHUNK_TOKENS` | `6000` | Inteiro | Tamanho de cada bloco quando a reunião não cabe em `OLLAMA_NUM_CTX` (map-reduce). |
+| `SPEAKER_NAME_MIN_CONFIDENCE` | `0.75` | `0` a `1` | Confiança mínima para aplicar automaticamente um nome inferido. |
+| `MAX_CONCURRENT_JOBS` | `1` | Inteiro | Processamentos pesados simultâneos (os demais aguardam na fila). |
+| `CORS_ORIGINS` | `["*"]` | Lista JSON | Origens permitidas para chamadas à API. |
 | `ENABLE_PYANNOTE` | `false` | `true`, `false` | Ativa o pipeline Pyannote legado se um `HF_TOKEN` for fornecido. |
 | `HF_TOKEN` | `""` | Token Hugging Face | Token opcional do Hugging Face (desnecessário para o SpeechBrain). |
 
@@ -216,8 +236,8 @@ Para executar os testes de validação do pipeline de áudio e das otimizações
 # Executar suíte completa de testes unitários e de integração
 docker compose exec app python -m unittest discover tests
 
-# Executar teste específico das novas otimizações (Silero VAD, word_timestamps e alinhamento cirúrgico)
-docker compose exec app python /app/tests/test_improvements.py
+# Executar só os testes da ata estruturada (não precisam de GPU nem de modelos baixados)
+docker compose exec app python -m unittest discover tests -p "test_minutes.py"
 ```
 
 ---
@@ -230,7 +250,7 @@ Quando a aplicação estiver rodando, a documentação Swagger interativa pode s
 | Método | Rota | Descrição |
 | :--- | :--- | :--- |
 | `POST` | `/api/upload` | Envio de arquivos de áudio/vídeo |
-| `POST` | `/api/process` | Dispara esteira de diarização, transcrição e ata |
+| `POST` | `/api/process` | Dispara esteira de diarização, transcrição e ata (aceita `objective`, `meeting_type`, `participants`, `glossary`) |
 | `GET` | `/api/jobs/{id}` | Consulta status da tarefa |
 | `GET` | `/api/jobs/{id}/stream` | Atualização em tempo real via Server-Sent Events |
 | `GET` | `/api/meetings` | Histórico de reuniões gravadas |
