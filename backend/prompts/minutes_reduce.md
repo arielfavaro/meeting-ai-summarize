@@ -11,6 +11,8 @@ CONSOLIDAÇÃO
 - `executive_summary`: 1 a 2 parágrafos sobre a reunião inteira. `title`: curto e específico.
 - Use apenas evidências (#IDs) que aparecem nas extrações; não crie IDs novos.
 
+{size_rules}
+
 {meeting_type_guidance}
 
 Responda apenas com o JSON no esquema solicitado.

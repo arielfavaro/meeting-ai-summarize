@@ -26,7 +26,7 @@
   - **Contexto da Reunião:** Objetivo/pauta, tipo de reunião (daily, planejamento, retrospectiva, 1:1, comercial, técnica...), participantes esperados e glossário. Nomes e termos também alimentam o `initial_prompt` do Whisper.
   - **Saída Estruturada (JSON Schema):** O esquema Pydantic é enviado no `format` do Ollama (geração restrita por gramática) e validado na volta, com nova tentativa informando o erro ao modelo.
   - **Evidências:** Cada objetivo, decisão, tarefa e ponto em aberto aponta os trechos da transcrição (`#ID`) que o sustentam — clique no horário para ouvir. Itens sem evidência são sinalizados.
-  - **Janela de Contexto Adaptativa + Map-Reduce:** `num_ctx` é dimensionado pelo tamanho real do prompt; reuniões que não cabem em `OLLAMA_NUM_CTX` são analisadas em blocos com sobreposição e consolidadas numa ata única.
+  - **Janela Planejada Antes da Chamada + Map-Reduce:** o schema da ata tem limites de itens e caracteres, então o tamanho máximo da resposta é conhecido de antemão; `num_ctx` = prompt + pior caso da resposta (em degraus de 2048, estável entre tentativas e blocos para o Ollama não recarregar o modelo). Reuniões que não cabem em `OLLAMA_NUM_CTX` são analisadas em blocos e consolidadas numa ata única.
   - Produz Atas executivas completas:
     - **Objetivos da Reunião** com status (atingido / parcial / não atingido).
     - **Resumo Executivo** estruturado.
@@ -178,7 +178,7 @@ Todas as opções do MeetingAI são configuradas centralizadamente via variávei
 | `WHISPER_COMPUTE_TYPE`| `int8` (ou `float16`)| `int8`, `float16`, `float32` | Precisão numérica: `float16` para GPU, `int8` para CPU. |
 | `DEFAULT_LANGUAGE` | `pt` | Código ISO (`pt`, `en`, `es`, `auto`) | Idioma padrão das reuniões. |
 | `MAX_FILE_SIZE_MB` | `500` | Inteiro (MB) | Limite de tamanho de arquivo aceito no upload. |
-| `OLLAMA_NUM_PREDICT` | `4096` | Inteiro | Tokens reservados para a resposta do LLM (a ata em JSON). |
+| `OLLAMA_NUM_PREDICT` | `4096` | Inteiro | Piso de tokens para a resposta do LLM. O valor efetivo é o pior caso do schema da ata (limites de itens e caracteres), calculado antes da chamada. |
 | `MINUTES_CHUNK_TOKENS` | `6000` | Inteiro | Tamanho de cada bloco quando a reunião não cabe em `OLLAMA_NUM_CTX` (map-reduce). |
 | `SPEAKER_NAME_MIN_CONFIDENCE` | `0.75` | `0` a `1` | Confiança mínima para aplicar automaticamente um nome inferido. |
 | `MAX_CONCURRENT_JOBS` | `1` | Inteiro | Processamentos pesados simultâneos (os demais aguardam na fila). |

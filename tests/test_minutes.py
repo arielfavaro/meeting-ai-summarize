@@ -9,6 +9,7 @@ from backend.models.schemas import MeetingContext
 from backend.services.llm.base import LLMResponse
 from backend.services.minutes.deadline_resolver import resolve_deadline
 from backend.services.minutes.generator import MinutesConfig, MinutesGenerator, MinutesRequest
+from backend.services.minutes.llm_schemas import max_output_tokens
 from backend.services.minutes.transcript_formatter import chunk_segments, format_segment
 from fakes import FakeLLM, minutes_payload, sample_segments, seg
 
@@ -108,11 +109,42 @@ class TestSinglePass(unittest.IsolatedAsyncioTestCase):
         # O erro de validação é devolvido ao modelo na nova tentativa
         self.assertIn("não passou na validação", llm.calls[2]["messages"][-1]["content"])
 
-    async def test_truncated_output_increases_num_predict(self):
+    async def test_window_is_planned_from_schema_before_calling(self):
+        """Orçamento da resposta vem do pior caso do schema: sem gerar, estourar e refazer."""
+        llm = FakeLLM([minutes_payload()])
+        progress = []
+        await make_generator(llm, num_predict=1000).generate(
+            make_request(on_progress=lambda m, lvl="info": progress.append(m)))
+        call = llm.calls[0]
+        expected_budget = max_output_tokens(call["schema"])
+        self.assertEqual(call["num_predict"], expected_budget)
+        self.assertGreater(expected_budget, 4096)                 # o antigo 4096 cortava atas grandes
+        self.assertEqual(call["num_ctx"] % 2048, 0)                # janela estável (evita recarga do modelo)
+        self.assertGreaterEqual(call["num_ctx"], expected_budget)
+        self.assertTrue(any(m.startswith("Plano da ata: passada única") for m in progress), progress)
+        # Schema ajustado à reunião: rótulos reais como enum e listas limitadas
+        speaker_schema = call["schema"]["$defs"]["LLMSpeakerName"]["properties"]["speaker_id"]
+        self.assertEqual(speaker_schema["enum"], ["Locutor 1", "Locutor 2", "Locutor 3"])
+        self.assertEqual(call["schema"]["properties"]["topics"]["maxItems"], 8)
+        self.assertIn("LIMITES DE TAMANHO", call["messages"][0]["content"])
+
+    async def test_retries_keep_the_same_window(self):
+        llm = FakeLLM(["isto não é json", minutes_payload()])
+        await make_generator(llm).generate(make_request())
+        self.assertEqual(llm.calls[0]["num_ctx"], llm.calls[1]["num_ctx"])
+
+    async def test_truncated_output_increases_budget(self):
         truncated = LLMResponse(content='{"objectives": [', done_reason="length")
         llm = FakeLLM([truncated, minutes_payload()])
-        await make_generator(llm, num_predict=1000).generate(make_request())
-        self.assertEqual(llm.calls[1]["num_predict"], 1500)
+        minutes = await make_generator(llm).generate(make_request())
+        self.assertEqual(llm.calls[1]["num_predict"], int(llm.calls[0]["num_predict"] * 1.5))
+        self.assertGreaterEqual(llm.calls[1]["num_ctx"], llm.calls[1]["num_predict"])
+        self.assertEqual(minutes.source, "llm")
+
+    async def test_lists_are_trimmed_if_backend_ignores_schema_limits(self):
+        payload = minutes_payload(decisions=[{"description": f"Decisão {i}", "evidence": [4]} for i in range(40)])
+        minutes = await make_generator(FakeLLM([payload])).generate(make_request())
+        self.assertLessEqual(len(minutes.decisions), 12)
 
     async def test_fallback_when_llm_unavailable(self):
         progress = []
@@ -135,13 +167,13 @@ class TestSinglePass(unittest.IsolatedAsyncioTestCase):
 class TestMapReduce(unittest.IsolatedAsyncioTestCase):
     async def test_long_meeting_uses_map_reduce(self):
         segments = [seg(i, i * 5.0, f"Locutor {1 + i % 2}", "Discussão longa sobre o projeto " * 8)
-                    for i in range(1, 61)]
+                    for i in range(1, 201)]
         extraction = {k: v for k, v in minutes_payload().items() if k not in ("title", "executive_summary")}
         extraction["speaker_names"] = []
-        n_chunks = len(chunk_segments(segments, 1500))
+        n_chunks = len(chunk_segments(segments, 3000))
         llm = FakeLLM([extraction] * n_chunks + [minutes_payload(speaker_names=[])])
 
-        gen = make_generator(llm, max_ctx=6000, num_predict=1000, chunk_tokens=1500)
+        gen = make_generator(llm, max_ctx=16384, chunk_tokens=3000)
         progress = []
         minutes = await gen.generate(make_request(segments=segments, on_progress=lambda m, lvl="info": progress.append((m, lvl))))
 
@@ -152,8 +184,14 @@ class TestMapReduce(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(progress[-1][1], "success")
         self.assertEqual(len(llm.calls), n_chunks + 1)
         self.assertIn("EXTRAÇÕES DOS BLOCOS", llm.calls[-1]["messages"][1]["content"])
+        # Todos os blocos usam a MESMA janela (o Ollama não recarrega o modelo a cada bloco)
+        block_ctx = {call["num_ctx"] for call in llm.calls[:-1]}
+        self.assertEqual(len(block_ctx), 1)
+        self.assertEqual(llm.calls[-1]["num_ctx"], block_ctx.pop())
         for call in llm.calls:
-            self.assertLessEqual(call["num_ctx"], 6000)
+            self.assertLessEqual(call["num_ctx"], 16384)
+            self.assertLessEqual(call["num_predict"], call["num_ctx"])
+        self.assertIn("até 3 objetivos, 4 tópicos", llm.calls[0]["messages"][0]["content"])  # limites por bloco
 
     def test_chunks_overlap_and_respect_budget(self):
         segments = [seg(i, float(i), "Locutor 1", "palavra " * 30) for i in range(1, 41)]

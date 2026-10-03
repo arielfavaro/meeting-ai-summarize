@@ -79,15 +79,14 @@ def test_multitrack_merge():
     assert merged[1].speaker == "Locutor 2"
 
 def test_adaptive_num_ctx():
-    print("=== TEST 4: Adaptive num_ctx calculation ===")
-    gen = MinutesGenerator(llm=None, config=MinutesConfig(default_model="x", max_ctx=32768, num_predict=4096))
+    print("=== TEST 4: Adaptive num_ctx (janela em degraus de 2048) ===")
+    gen = MinutesGenerator(llm=None, config=MinutesConfig(default_model="x", max_ctx=32768))
+    assert gen._bucket(100) == 4096            # piso mínimo
+    assert gen._bucket(9000) == 10240          # arredonda para cima, múltiplo de 2048
+    assert gen._bucket(99999) == 32768         # teto configurado
     short = [{"role": "user", "content": "Locutor 1: Oi\nLocutor 2: Olá"}]
-    assert gen._num_ctx_for(short, 0) == 4096           # piso mínimo
-    assert 4096 <= gen._num_ctx_for(short, 4096) < 4300  # prompt curto + espaço para a resposta
     long = [{"role": "user", "content": "Locutor 1: Teste longo de reunião com argumentos corporativos " * 2500}]
-    ctx_long = gen._num_ctx_for(long, 4096)
-    print(f"Long dialogue context: {ctx_long} tokens")
-    assert 4096 < ctx_long <= 32768
+    assert gen._prompt_tokens(short) < 100 < gen._prompt_tokens(long)
 
 
 def test_diarization_falls_back_to_local_engine():

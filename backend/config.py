@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://ollama:11434"
     OLLAMA_MODEL: str = "gemma4:12b"
     OLLAMA_NUM_CTX: int = 32768         # teto da janela de contexto
-    OLLAMA_NUM_PREDICT: int = 4096      # tokens reservados para a resposta (ata em JSON)
+    OLLAMA_NUM_PREDICT: int = 4096      # piso de tokens para a resposta; o valor real vem do pior caso do schema
     OLLAMA_TIMEOUT: float = 900.0
 
     # Geração da ata

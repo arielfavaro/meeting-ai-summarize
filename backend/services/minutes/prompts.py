@@ -5,8 +5,9 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from backend.models.schemas import MeetingContext
+from backend.services.minutes.llm_schemas import EXTRACT_LIST_LIMITS, size_rules_text
 
-PROMPT_VERSION = "minutes-v2"
+PROMPT_VERSION = "minutes-v3"
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 
 
@@ -24,8 +25,10 @@ def system_prompt(kind: str, meeting_type: str = "geral") -> str:
     """kind: 'single' | 'extract' | 'reduce'."""
     template = _read(f"minutes_{kind}.md")
     guidance = _meeting_types().get(meeting_type, "")
+    size_rules = size_rules_text(EXTRACT_LIST_LIMITS if kind == "extract" else None)
     return (
         template.replace("{common_rules}", _read("common_rules.md").strip())
+        .replace("{size_rules}", size_rules)
         .replace("{meeting_type_guidance}", guidance)
         .strip()
     )

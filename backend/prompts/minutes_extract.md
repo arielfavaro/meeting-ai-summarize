@@ -7,6 +7,8 @@ OBSERVAÇÕES PARA BLOCOS
 - Em `objectives`, registre apenas objetivos declarados ou informados que apareçam neste bloco (status provisório).
 - Em `topics`, registre os assuntos tratados neste bloco com a discussão resumida.
 
+{size_rules}
+
 {meeting_type_guidance}
 
 Responda apenas com o JSON no esquema solicitado.

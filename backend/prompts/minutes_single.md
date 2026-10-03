@@ -7,6 +7,8 @@ RESUMO E TÍTULO
 - `title`: curto e específico (evite títulos genéricos como "Reunião de alinhamento").
 - `topics`: agrupe a discussão em tópicos; em `discussion` registre argumentos e posições relevantes; em `conclusions`, a conclusão do tópico (ou "Sem conclusão").
 
+{size_rules}
+
 {meeting_type_guidance}
 
 Responda apenas com o JSON no esquema solicitado.
