@@ -2,7 +2,7 @@ import json
 import logging
 import re
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 import httpx
 from backend.config import settings
 from backend.models.schemas import MeetingMinutes, TopicItem, ActionItem, SpeakerSegment
@@ -31,7 +31,8 @@ class SummarizerService:
         title: str = "Reunião de Alinhamento",
         model_name: Optional[str] = None,
         custom_prompt: Optional[str] = None,
-        duration_minutes: float = 0.0
+        duration_minutes: float = 0.0,
+        log_callback: Optional[Callable[[str], None]] = None
     ) -> MeetingMinutes:
         """
         Gera a Ata de Reunião completa e estruturada em Português do Brasil.
@@ -167,6 +168,9 @@ class SummarizerService:
         max_ctx = getattr(settings, "OLLAMA_NUM_CTX", 32768)
         num_ctx = min(max_ctx, max(4096, estimated_tokens))
         logger.info(f"Ollama num_ctx adaptativo dimensionado para {num_ctx} tokens (teto configurado: {max_ctx})")
+        if log_callback:
+            log_callback(f"Conectando ao Ollama ({model}) com contexto alocado de {num_ctx} tokens...")
+            log_callback("Sintetizando Resumo Executivo, Decisões e Matriz de Ações via LLM...")
 
         async with httpx.AsyncClient(timeout=600.0) as client:
             raw_response = ""
@@ -213,6 +217,8 @@ class SummarizerService:
 
             # Parser seguro de JSON
             parsed = cls._parse_llm_json(raw_response)
+            if log_callback:
+                log_callback("Resposta recebida do Ollama! Montando estrutura executiva da ata...")
 
             # Construir os itens tipados
             topics = [TopicItem(**t) for t in parsed.get("main_topics", [])]

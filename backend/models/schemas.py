@@ -72,9 +72,10 @@ class MeetingListItem(BaseModel):
 class JobStatus(BaseModel):
     job_id: str
     meeting_id: Optional[str] = None
-    status: str  # "queued", "preprocessing", "diarizing", "transcribing", "summarizing", "completed", "failed"
+    status: str  # "queued", "preprocessing", "diarizing", "transcribing", "aligning", "summarizing", "completed", "failed"
     progress: int = 0  # 0 to 100
     current_step: str = ""
+    logs: List[str] = Field(default_factory=list)
     error: Optional[str] = None
     result: Optional[MeetingDetail] = None
 

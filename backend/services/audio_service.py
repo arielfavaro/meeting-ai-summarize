@@ -3,7 +3,7 @@ import subprocess
 import json
 import logging
 from pathlib import Path
-from typing import Tuple, Dict, Any, Optional, List
+from typing import Tuple, Dict, Any, Optional, List, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -20,58 +20,56 @@ class AudioService:
             "-show_streams",
             str(file_path)
         ]
-        try:
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-            data = json.loads(result.stdout)
-            duration = float(data.get("format", {}).get("duration", 0.0))
-            return {
-                "duration": duration,
-                "format": data.get("format", {}).get("format_name", ""),
-                "bitrate": data.get("format", {}).get("bit_rate", "")
-            }
-        except Exception as e:
-            logger.warning(f"ffprobe falhou ({e}), tentando calcular duração com soundfile/wave...")
-            try:
-                import soundfile as sf
-                info = sf.info(str(file_path))
-                return {
-                    "duration": info.duration,
-                    "format": info.format,
-                    "samplerate": info.samplerate
-                }
-            except Exception as e2:
-                logger.error(f"Erro ao ler áudio com soundfile: {e2}")
-                return {"duration": 0.0, "format": "unknown"}
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode != 0:
+            raise RuntimeError(f"Erro ao ler metadados do áudio: {res.stderr}")
+
+        data = json.loads(res.stdout)
+        duration = float(data.get("format", {}).get("duration", 0))
+        audio_streams = [s for s in data.get("streams", []) if s.get("codec_type") == "audio"]
+        channels = audio_streams[0].get("channels", 1) if audio_streams else 1
+        sample_rate = int(audio_streams[0].get("sample_rate", 16000)) if audio_streams else 16000
+
+        return {
+            "duration": duration,
+            "channels": channels,
+            "sample_rate": sample_rate,
+            "format": data.get("format", {}).get("format_name", "unknown")
+        }
 
     @staticmethod
     def get_audio_streams_count(file_path: Path) -> int:
-        """Detecta a quantidade de faixas de áudio no arquivo usando ffprobe."""
+        """Verifica a quantidade de faixas (streams) de áudio presentes no arquivo."""
         cmd = [
             "ffprobe",
-            "-v", "error",
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams",
             "-select_streams", "a",
-            "-show_entries", "stream=index",
-            "-of", "json",
             str(file_path)
         ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode != 0:
+            return 1
         try:
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-            data = json.loads(result.stdout)
+            data = json.loads(res.stdout)
             streams = data.get("streams", [])
-            return len(streams)
-        except Exception as e:
-            logger.warning(f"ffprobe erro ao inspecionar faixas de áudio: {e}")
+            return max(1, len(streams))
+        except Exception:
             return 1
 
     @staticmethod
-    def detect_active_audio_tracks(file_path: Path) -> list:
+    def detect_active_audio_tracks(file_path: Path, log_callback: Optional[Callable[[str], None]] = None) -> List[int]:
         """
-        Inspeciona todas as faixas de áudio do arquivo e retorna os índices daquelas
+        Analisa o volume de cada faixa de áudio presente no container e retorna os índices
         que contêm sinal de áudio audível (descartando canais mudos/inativos).
         """
         total_streams = AudioService.get_audio_streams_count(file_path)
         if total_streams <= 1:
             return [0]
+
+        if log_callback:
+            log_callback(f"Analisando {total_streams} faixas de áudio com filtro volumedetect do FFmpeg...")
 
         active_tracks = []
         for i in range(total_streams):
@@ -96,9 +94,14 @@ class AudioService:
                         if parts:
                             mean_vol = float(parts[0])
 
-                logger.info(f"Faixa de áudio {i}: max_volume={max_vol}dB, mean_volume={mean_vol}dB")
+                is_active = (max_vol > -50.0 or mean_vol > -70.0)
+                status_desc = f"ativa (pico={max_vol:.1f}dB, média={mean_vol:.1f}dB)" if is_active else f"muda/inativa (pico={max_vol:.1f}dB)"
+                logger.info(f"Faixa de áudio {i}: {status_desc}")
+                if log_callback:
+                    log_callback(f"Faixa #{i}: {status_desc}")
+
                 # Se o pico for superior a -50dB ou média superior a -70dB, a faixa possui som perceptível
-                if max_vol > -50.0 or mean_vol > -70.0:
+                if is_active:
                     active_tracks.append(i)
             except Exception as e:
                 logger.warning(f"Erro ao verificar volume da faixa {i}: {e}. Considerando ativa por precaução.")
@@ -106,9 +109,13 @@ class AudioService:
 
         if not active_tracks:
             logger.warning("Nenhuma faixa ativa detectada acima do limiar. Utilizando faixa 0 como padrão.")
+            if log_callback:
+                log_callback("Nenhuma faixa com volume acima do limiar. Usando faixa 0 como padrão.")
             return [0]
 
         logger.info(f"Faixas de áudio ativas detectadas ({len(active_tracks)}/{total_streams}): {active_tracks}")
+        if log_callback:
+            log_callback(f"Faixas ativas confirmadas: {active_tracks} ({len(active_tracks)}/{total_streams} ativas)")
         return active_tracks
 
     @staticmethod

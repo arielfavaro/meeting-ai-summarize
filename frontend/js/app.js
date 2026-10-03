@@ -223,6 +223,8 @@ class MeetingApp {
     this.progressFill.style.width = "0%";
     this.currentStepLabel.textContent = "Preparando modelos locais...";
     this.logBox.innerHTML = "";
+    this.renderedLogsCount = 0;
+    this.lastRenderedStep = "";
     for (let i = 1; i <= 5; i++) {
       const step = document.getElementById(`step-${i}`);
       step.className = "step-item";
@@ -231,8 +233,23 @@ class MeetingApp {
 
   _updateProgressUI(job) {
     this.progressFill.style.width = `${job.progress}%`;
-    this.currentStepLabel.textContent = job.current_step;
-    this._appendLog(`[Progresso ${job.progress}%] ${job.current_step}`);
+    if (job.current_step) {
+      this.currentStepLabel.textContent = job.current_step;
+    }
+
+    // Renderizar novos logs do backend em tempo real
+    if (job.logs && Array.isArray(job.logs)) {
+      if (job.logs.length > (this.renderedLogsCount || 0)) {
+        for (let i = this.renderedLogsCount || 0; i < job.logs.length; i++) {
+          this._appendLogLine(job.logs[i]);
+        }
+        this.renderedLogsCount = job.logs.length;
+      }
+    } else if (job.current_step && job.current_step !== this.lastRenderedStep) {
+      const time = new Date().toLocaleTimeString();
+      this._appendLogLine(`[${time}] [Progresso ${job.progress}%] ${job.current_step}`);
+      this.lastRenderedStep = job.current_step;
+    }
 
     const statusMap = {
       preprocessing: 1,
@@ -246,6 +263,7 @@ class MeetingApp {
     const currentStepIdx = statusMap[job.status] || 1;
     for (let i = 1; i <= 5; i++) {
       const step = document.getElementById(`step-${i}`);
+      if (!step) continue;
       if (i < currentStepIdx) {
         step.className = "step-item completed";
       } else if (i === currentStepIdx) {
@@ -257,9 +275,44 @@ class MeetingApp {
   }
 
   _appendLog(text) {
-    const line = document.createElement("div");
     const time = new Date().toLocaleTimeString();
-    line.textContent = `[${time}] ${text}`;
+    this._appendLogLine(`[${time}] ${text}`);
+  }
+
+  _appendLogLine(rawText) {
+    if (!this.logBox) return;
+    const line = document.createElement("div");
+    line.className = "log-line";
+
+    const text = String(rawText);
+    if (
+      text.includes("concluído") ||
+      text.includes("sucesso") ||
+      text.includes("✅") ||
+      text.includes("inferido") ||
+      text.includes("pronto") ||
+      text.includes("confirmadas")
+    ) {
+      line.classList.add("log-success");
+    } else if (
+      text.includes("Erro") ||
+      text.includes("falhou") ||
+      text.includes("Falha") ||
+      text.includes("error")
+    ) {
+      line.classList.add("log-error");
+    } else if (
+      text.includes("Faixa") ||
+      text.includes("Whisper") ||
+      text.includes("Ollama") ||
+      text.includes("Silero") ||
+      text.includes("SpeechBrain") ||
+      text.includes("FFmpeg")
+    ) {
+      line.classList.add("log-info");
+    }
+
+    line.textContent = text;
     this.logBox.appendChild(line);
     this.logBox.scrollTop = this.logBox.scrollHeight;
   }

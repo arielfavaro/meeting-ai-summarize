@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Callable
 import numpy as np
 from backend.config import settings
 
@@ -49,7 +49,8 @@ class DiarizationService:
         self,
         audio_path: Path,
         min_speakers: Optional[int] = None,
-        max_speakers: Optional[int] = None
+        max_speakers: Optional[int] = None,
+        log_callback: Optional[Callable[[str], None]] = None
     ) -> List[Dict[str, Any]]:
         """
         Executa separação de oradores (Diarização) 100% local e offline.
@@ -58,20 +59,29 @@ class DiarizationService:
         if settings.ENABLE_PYANNOTE and self.hf_token:
             try:
                 logger.info("Tentando diarização com Pyannote...")
+                if log_callback:
+                    log_callback("Executando diarização com Pyannote...")
                 return self._diarize_pyannote(audio_path, min_speakers, max_speakers)
             except Exception as e:
                 logger.warning(f"Pyannote indisponível ({e}). Tentando motor SpeechBrain...")
 
         # 2. Diarização Neural SpeechBrain (ECAPA-TDNN) 100% Local (alta precisão)
         try:
-            return self._diarize_speechbrain(audio_path, min_speakers, max_speakers)
+            return self._diarize_speechbrain(audio_path, min_speakers, max_speakers, log_callback=log_callback)
         except Exception as e:
             logger.warning(f"SpeechBrain indisponível ({e}). Executando motor acústico Librosa...")
+            if log_callback:
+                log_callback(f"Aviso: SpeechBrain offline ({e}). Utilizando motor acústico Librosa...")
+
+        # 3. Fallback: Diarização local avançada baseada em características acústicas
+        return self._diarize_local_features(audio_path, min_speakers, max_speakers)
+
     def _diarize_speechbrain(
         self,
         audio_path: Path,
         min_speakers: Optional[int] = None,
-        max_speakers: Optional[int] = None
+        max_speakers: Optional[int] = None,
+        log_callback: Optional[Callable[[str], None]] = None
     ) -> List[Dict[str, Any]]:
         """
         Diarizador neural de alta precisão baseado em SpeechBrain (ECAPA-TDNN).
@@ -95,6 +105,9 @@ class DiarizationService:
         segments = self._detect_speech_segments(y, sr)
         if not segments:
             return [{"start": 0.0, "end": round(duration, 2), "speaker": "Locutor 1"}]
+
+        if log_callback:
+            log_callback(f"Silero VAD: {len(segments)} fatias de voz detectadas ({duration / 60:.1f} min).")
 
         # 2. Extração de embeddings neurais em lotes
         valid_segments = []
@@ -140,6 +153,8 @@ class DiarizationService:
             max_speakers=max_speakers
         )
         logger.info(f"SpeechBrain: número ótimo de locutores determinado: k={k} ({n_samples} amostras).")
+        if log_callback:
+            log_callback(f"Classificação neural: k={k} locutores detectados ({n_samples} amostras de fala).")
 
         # 4. Agrupamento Hierárquico Aglomerativo
         if k <= 1:
@@ -187,6 +202,8 @@ class DiarizationService:
 
         smoothed = self._smooth_segments(raw_diarized)
         logger.info(f"Diarização SpeechBrain concluída: {len(speaker_map)} locutores identificados em {len(smoothed)} segmentos.")
+        if log_callback:
+            log_callback(f"Diarização finalizada: {len(speaker_map)} locutores mapeados em {len(smoothed)} segmentos de fala.")
         return smoothed
 
     def _determine_k_neural(

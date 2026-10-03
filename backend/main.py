@@ -58,62 +58,97 @@ JOBS: Dict[str, JobStatus] = {}
 
 
 async def run_pipeline_task(job_id: str, file_id: str, title: str, options: ProcessOptions):
-    """Pipeline assíncrono executado em segundo plano com suporte a faixas ativas múltiplas."""
+    """Pipeline assíncrono executado em segundo plano com suporte a faixas ativas múltiplas e log em tempo real."""
     job = JOBS[job_id]
+
+    def add_job_log(message: str, step_status: Optional[str] = None, progress: Optional[int] = None):
+        now_str = datetime.now().strftime("%H:%M:%S")
+        log_entry = f"[{now_str}] {message}"
+        job.logs.append(log_entry)
+        if len(job.logs) > 150:
+            job.logs.pop(0)
+        job.current_step = message
+        if step_status:
+            job.status = step_status
+        if progress is not None:
+            job.progress = progress
+        logger.info(f"[{job_id}] {message}")
+
     try:
         raw_audio_path = settings.UPLOAD_DIR / file_id
         if not raw_audio_path.exists():
             raise FileNotFoundError(f"Arquivo {file_id} não encontrado.")
 
         # Passo 1: Pré-processamento e análise de faixas de áudio
-        job.status = "preprocessing"
-        job.progress = 5
-        job.current_step = "Analisando faixas de áudio e convertendo (FFmpeg)..."
-        logger.info(f"[{job_id}] {job.current_step}")
+        add_job_log("Analisando faixas de áudio e convertendo (FFmpeg 16kHz)...", step_status="preprocessing", progress=5)
 
-        active_tracks = AudioService.detect_active_audio_tracks(raw_audio_path)
-        logger.info(f"[{job_id}] Faixas ativas detectadas: {active_tracks}")
+        def audio_detect_log(msg: str):
+            add_job_log(msg)
+
+        active_tracks = AudioService.detect_active_audio_tracks(raw_audio_path, log_callback=audio_detect_log)
 
         wav_filename = f"{Path(file_id).stem}_16k.wav"
         processed_wav_path = settings.PROCESSED_DIR / wav_filename
         # Gera o áudio mestre para reprodução no player web (com todas as faixas ativas combinadas)
+        add_job_log("Gerando áudio mestre 16kHz mono para reprodução e sincronização...", progress=10)
         wav_path, duration = AudioService.convert_to_wav_16k_mono(raw_audio_path, processed_wav_path, active_tracks=active_tracks)
         duration_minutes = duration / 60.0
+        add_job_log(f"Áudio mestre pronto! Duração: {duration_minutes:.1f} minutos ({duration:.1f}s).", progress=15)
 
         if len(active_tracks) > 1:
-            job.current_step = f"Processando gravação multi-faixa ({len(active_tracks)} faixas de áudio ativas)..."
-            logger.info(f"[{job_id}] {job.current_step}")
+            add_job_log(
+                f"Gravação multi-faixa ativada ({len(active_tracks)} faixas ativas: {active_tracks}).",
+                step_status="preprocessing",
+                progress=15
+            )
 
             track_aligned_results = []
             diarizer = DiarizationService(hf_token=options.hf_token)
 
             for idx, track_no in enumerate(active_tracks):
-                track_step_base = 15 + int((idx / len(active_tracks)) * 55)
-                job.progress = track_step_base
-                job.current_step = f"Processando faixa {idx + 1}/{len(active_tracks)} (stream #{track_no})..."
-                logger.info(f"[{job_id}] {job.current_step}")
+                track_step_base = 15 + int((idx / len(active_tracks)) * 60)
+
+                # --- ETAPA 2: DIARIZAÇÃO DA FAIXA ---
+                add_job_log(
+                    f"[Faixa {idx + 1}/{len(active_tracks)}] Extraindo stream #{track_no} e separando oradores...",
+                    step_status="diarizing",
+                    progress=track_step_base
+                )
 
                 # Extrai a faixa individual para arquivo temporário de 16kHz
                 track_wav_filename = f"{Path(file_id).stem}_track_{track_no}_16k.wav"
                 track_wav_path = settings.PROCESSED_DIR / track_wav_filename
                 AudioService.extract_track_to_wav_16k(raw_audio_path, track_no, track_wav_path)
 
-                # Diarização da faixa individual
-                # Em arquivos multi-faixa, não forçamos min_speakers alto em canais individuais
-                # permitindo que um microfone permaneça como 1 orador único (k=1)
+                def diar_track_log(msg: str):
+                    add_job_log(f"[Faixa {idx + 1}] {msg}")
+
                 track_diar_segments = diarizer.diarize(
                     audio_path=track_wav_path,
                     min_speakers=None,
-                    max_speakers=options.max_speakers
+                    max_speakers=options.max_speakers,
+                    log_callback=diar_track_log
                 )
 
-                # Transcrição da faixa individual
+                # --- ETAPA 3: TRANSCRIÇÃO DA FAIXA ---
+                add_job_log(
+                    f"[Faixa {idx + 1}/{len(active_tracks)}] Transcrevendo fala (Faster-Whisper '{options.whisper_model}')...",
+                    step_status="transcribing",
+                    progress=track_step_base + int(0.2 * (60 / len(active_tracks)))
+                )
+
+                last_logged_bucket = -1
                 def on_track_progress(current_sec: float, total_sec: float, t_idx=idx, base=track_step_base):
+                    nonlocal last_logged_bucket
                     if total_sec > 0:
                         pct = min(99, int((current_sec / total_sec) * 100))
-                        progress_increment = int((pct / 100) * (55 / len(active_tracks)))
-                        job.progress = min(70, base + progress_increment)
+                        progress_increment = int((pct / 100) * (60 / len(active_tracks)))
+                        job.progress = min(74, base + progress_increment)
                         job.current_step = f"Transcrevendo faixa {t_idx + 1}/{len(active_tracks)}: {pct}% ({current_sec/60:.1f}/{total_sec/60:.1f} min)..."
+                        bucket = pct // 20
+                        if bucket > last_logged_bucket:
+                            last_logged_bucket = bucket
+                            add_job_log(f"[Faixa {t_idx + 1}] Transcrição: {pct}% ({current_sec/60:.1f}/{total_sec/60:.1f} min)")
 
                 track_transcription = TranscriptionService.transcribe(
                     audio_path=track_wav_path,
@@ -128,39 +163,49 @@ async def run_pipeline_task(job_id: str, file_id: str, title: str, options: Proc
                     diarization_segments=track_diar_segments
                 )
                 track_aligned_results.append(track_aligned)
+                add_job_log(f"[Faixa {idx + 1}] Concluída com {len(track_aligned)} falas sincronizadas.")
 
-            # Combina e intercala cronologicamente as faixas
-            job.status = "aligning"
-            job.progress = 75
-            job.current_step = "Sincronizando e intercalando faixas de áudio..."
-            logger.info(f"[{job_id}] {job.current_step}")
-
+            # --- ETAPA 4: SINCRONIZAR E INTERCALAR ---
+            add_job_log(
+                f"Sincronizando e intercalando todas as {len(active_tracks)} faixas cronologicamente...",
+                step_status="aligning",
+                progress=75
+            )
             aligned_segments = merge_multitrack_segments(track_aligned_results)
+            add_job_log(f"Intercalação concluída! Total combinado: {len(aligned_segments)} segmentos de fala.", progress=80)
 
         else:
             # Fluxo padrão de faixa única
-            job.status = "diarizing"
-            job.progress = 30
-            job.current_step = "Identificando e separando locutores (Diarização Local)..."
-            logger.info(f"[{job_id}] {job.current_step}")
+            add_job_log("Identificando e separando locutores (Silero VAD + SpeechBrain)...", step_status="diarizing", progress=20)
+
+            def single_diar_log(msg: str):
+                add_job_log(msg)
 
             diarizer = DiarizationService(hf_token=options.hf_token)
             diarization_segments = diarizer.diarize(
                 audio_path=wav_path,
                 min_speakers=options.min_speakers,
-                max_speakers=options.max_speakers
+                max_speakers=options.max_speakers,
+                log_callback=single_diar_log
             )
 
-            job.status = "transcribing"
-            job.progress = 35
-            job.current_step = f"Transcrevendo fala em Português (Faster-Whisper '{options.whisper_model}')..."
-            logger.info(f"[{job_id}] {job.current_step}")
+            add_job_log(
+                f"Transcrevendo fala em Português (Faster-Whisper '{options.whisper_model}')...",
+                step_status="transcribing",
+                progress=35
+            )
 
+            last_logged_bucket = -1
             def on_transcribe_progress(current_sec: float, total_sec: float):
+                nonlocal last_logged_bucket
                 if total_sec > 0:
                     pct = min(99, int((current_sec / total_sec) * 100))
                     job.progress = 35 + int((pct / 100) * 35)
                     job.current_step = f"Transcrevendo: {pct}% ({current_sec/60:.1f}/{total_sec/60:.1f} min)..."
+                    bucket = pct // 20
+                    if bucket > last_logged_bucket:
+                        last_logged_bucket = bucket
+                        add_job_log(f"Transcrição Whisper: {pct}% ({current_sec/60:.1f}/{total_sec/60:.1f} min)")
 
             transcription_raw = TranscriptionService.transcribe(
                 audio_path=wav_path,
@@ -169,21 +214,22 @@ async def run_pipeline_task(job_id: str, file_id: str, title: str, options: Proc
                 progress_callback=on_transcribe_progress
             )
 
-            job.status = "aligning"
-            job.progress = 75
-            job.current_step = "Sincronizando falas e oradores..."
-            logger.info(f"[{job_id}] {job.current_step}")
-
+            add_job_log("Sincronizando falas e oradores com alinhamento fino por palavra...", step_status="aligning", progress=75)
             aligned_segments = align_transcription_with_diarization(
                 transcription_segments=transcription_raw,
                 diarization_segments=diarization_segments
             )
+            add_job_log(f"Alinhamento concluído com {len(aligned_segments)} falas atribuídas.", progress=80)
 
         # Passo 5: Geração da Ata de Reunião com Ollama Local
-        job.status = "summarizing"
-        job.progress = 85
-        job.current_step = "Gerando Ata Executiva com IA Local (Ollama)..."
-        logger.info(f"[{job_id}] {job.current_step}")
+        add_job_log(
+            f"Gerando Ata Executiva com IA Local (Ollama '{options.ollama_model or 'padrão'}')...",
+            step_status="summarizing",
+            progress=82
+        )
+
+        def summarizer_log(msg: str):
+            add_job_log(msg)
 
         meeting_id = str(uuid.uuid4())
         summary = await SummarizerService.generate_minutes(
@@ -191,7 +237,8 @@ async def run_pipeline_task(job_id: str, file_id: str, title: str, options: Proc
             title=title or f"Reunião {datetime.now().strftime('%d/%m/%Y')}",
             model_name=options.ollama_model,
             custom_prompt=options.custom_prompt,
-            duration_minutes=duration_minutes
+            duration_minutes=duration_minutes,
+            log_callback=summarizer_log
         )
 
         # Mapeamento inicial de locutores
@@ -203,7 +250,7 @@ async def run_pipeline_task(job_id: str, file_id: str, title: str, options: Proc
             for spk_id, real_name in summary.suggested_speakers.items():
                 real_name_clean = str(real_name).strip()
                 if spk_id in speaker_map and real_name_clean and real_name_clean != spk_id:
-                    logger.info(f"[{job_id}] Nome real inferido: '{spk_id}' -> '{real_name_clean}'")
+                    add_job_log(f"Nome real inferido no diálogo: '{spk_id}' ➔ '{real_name_clean}'")
                     speaker_map[spk_id] = real_name_clean
             # Sincronizar os identificadores dos segmentos
             for seg in aligned_segments:
@@ -225,9 +272,7 @@ async def run_pipeline_task(job_id: str, file_id: str, title: str, options: Proc
         # Salvar no banco SQLite
         database.save_meeting(meeting_detail)
 
-        job.status = "completed"
-        job.progress = 100
-        job.current_step = "Processamento concluído com sucesso!"
+        add_job_log("Processamento concluído com sucesso! Reunião salva no banco local.", step_status="completed", progress=100)
         job.meeting_id = meeting_id
         job.result = meeting_detail
         logger.info(f"[{job_id}] Reunião processada e salva com ID: {meeting_id}")
@@ -237,7 +282,7 @@ async def run_pipeline_task(job_id: str, file_id: str, title: str, options: Proc
         job.status = "failed"
         job.progress = 100
         job.error = str(e)
-        job.current_step = f"Falha no processamento: {str(e)}"
+        add_job_log(f"Falha no processamento: {str(e)}", step_status="failed", progress=100)
 
 
 # Rotas de Upload e Processamento
@@ -322,20 +367,25 @@ async def get_job_status(job_id: str):
 
 @app.get("/api/jobs/{job_id}/stream")
 async def stream_job_status(job_id: str):
-    """Server-Sent Events (SSE) para atualização em tempo real do status na interface."""
+    """Server-Sent Events (SSE) para atualização em tempo real do status e logs na interface."""
     if job_id not in JOBS:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
 
     async def event_generator():
+        last_data = None
         while True:
             job = JOBS.get(job_id)
             if not job:
                 break
             data = job.model_dump_json()
-            yield f"data: {data}\n\n"
+            if data != last_data:
+                yield f"data: {data}\n\n"
+                last_data = data
             if job.status in ("completed", "failed"):
+                # Garante envio do estado final antes de encerrar conexão
+                yield f"data: {data}\n\n"
                 break
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
