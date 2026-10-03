@@ -20,7 +20,9 @@ FILE_ID = "123e4567-e89b-42d3-a456-426614174000.wav"
 
 class FakeAudio:
     @staticmethod
-    def detect_active_audio_tracks(path):
+    def detect_active_audio_tracks(path, log_callback=None):
+        if log_callback:
+            log_callback("Faixa #0: ativa (pico=-3.0dB, média=-20.0dB)")
         return [0]
 
     @staticmethod
@@ -30,8 +32,10 @@ class FakeAudio:
 
 
 class FakeDiarizer:
-    def diarize(self, path, min_speakers=None, max_speakers=None):
+    def diarize(self, path, min_speakers=None, max_speakers=None, log_callback=None):
         time.sleep(0.3)  # trabalho síncrono pesado
+        if log_callback:
+            log_callback("Diarização finalizada: 3 locutor(es).", "success")
         return [{"start": s.start, "end": s.end, "speaker": s.speaker_id} for s in sample_segments()]
 
 
@@ -94,6 +98,16 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.result["summary"]["action_items"][0]["owner"], "Mariana")
         self.assertEqual(meeting.context.glossary, ["rollback"])
 
+        # Log em tempo real: mensagens dos serviços, níveis e sequência crescente
+        messages = [entry.message for entry in final.logs]
+        self.assertIn("Faixa #0: ativa (pico=-3.0dB, média=-20.0dB)", messages)
+        self.assertTrue(any(m.startswith("Transcrição: 50%") for m in messages), messages)
+        self.assertTrue(any("Nome identificado: Locutor 1 ➔ Carlos" in m for m in messages))
+        self.assertTrue(any(m.startswith("Ata gerada:") for m in messages))
+        self.assertEqual(final.logs[-1].level, "success")
+        seqs = [entry.seq for entry in final.logs]
+        self.assertEqual(seqs, sorted(seqs))
+
     async def test_jobs_are_serialized(self):
         options = ProcessOptions()
         j1, j2 = self.jobs.create(), self.jobs.create()
@@ -108,7 +122,20 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_file_fails_job(self):
         job = self.jobs.create()
         await self.pipeline.run(job.job_id, "../../etc/passwd", "X", ProcessOptions())
-        self.assertEqual(self.jobs.get(job.job_id).status, "failed")
+        failed = self.jobs.get(job.job_id)
+        self.assertEqual(failed.status, "failed")
+        self.assertTrue(failed.error)
+        self.assertEqual(failed.logs[-1].level, "error")
+
+    def test_log_is_capped_and_sequence_keeps_growing(self):
+        from backend.services.jobs import MAX_LOG_LINES
+        job = self.jobs.create()
+        for i in range(MAX_LOG_LINES + 20):
+            self.jobs.log(job.job_id, f"linha {i}")
+        logs = self.jobs.get(job.job_id).logs
+        self.assertEqual(len(logs), MAX_LOG_LINES)
+        self.assertEqual(logs[-1].seq, MAX_LOG_LINES + 20)
+        self.assertEqual(self.jobs.get(job.job_id).current_step, f"linha {MAX_LOG_LINES + 19}")
 
 
 if __name__ == "__main__":

@@ -217,12 +217,23 @@ JobState = Literal[
 ]
 
 
+LogLevel = Literal["info", "success", "warning", "error"]
+
+
+class JobLogEntry(BaseModel):
+    seq: int          # sequência monotônica: o frontend renderiza só o que ainda não viu
+    time: str         # HH:MM:SS
+    level: LogLevel = "info"
+    message: str
+
+
 class JobStatus(BaseModel):
     job_id: str
     meeting_id: Optional[str] = None
     status: JobState
     progress: int = 0  # 0 a 100
     current_step: str = ""
+    logs: List[JobLogEntry] = Field(default_factory=list)  # últimas linhas do log em tempo real
     error: Optional[str] = None
     result: Optional[dict] = None  # visão apresentada (nomes resolvidos)
     updated_at: float = 0.0

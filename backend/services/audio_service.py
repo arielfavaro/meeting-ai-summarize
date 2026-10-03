@@ -3,7 +3,7 @@ import subprocess
 import json
 import logging
 from pathlib import Path
-from typing import Tuple, Dict, Any, Optional, List
+from typing import Tuple, Dict, Any, Optional, List, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -64,14 +64,21 @@ class AudioService:
             return 1
 
     @staticmethod
-    def detect_active_audio_tracks(file_path: Path) -> list:
+    def detect_active_audio_tracks(file_path: Path, log_callback: Optional[Callable[..., None]] = None) -> List[int]:
         """
         Inspeciona todas as faixas de áudio do arquivo e retorna os índices daquelas
         que contêm sinal de áudio audível (descartando canais mudos/inativos).
+        `log_callback(mensagem, nivel)` recebe o diagnóstico de cada faixa para o log em tempo real.
         """
+        def emit(message: str, level: str = "info") -> None:
+            if log_callback:
+                log_callback(message, level)
+
         total_streams = AudioService.get_audio_streams_count(file_path)
         if total_streams <= 1:
             return [0]
+
+        emit(f"Analisando {total_streams} faixas de áudio (FFmpeg volumedetect)...")
 
         active_tracks = []
         for i in range(total_streams):
@@ -96,19 +103,26 @@ class AudioService:
                         if parts:
                             mean_vol = float(parts[0])
 
-                logger.info(f"Faixa de áudio {i}: max_volume={max_vol}dB, mean_volume={mean_vol}dB")
                 # Se o pico for superior a -50dB ou média superior a -70dB, a faixa possui som perceptível
-                if max_vol > -50.0 or mean_vol > -70.0:
+                is_active = max_vol > -50.0 or mean_vol > -70.0
+                desc = (f"ativa (pico={max_vol:.1f}dB, média={mean_vol:.1f}dB)" if is_active
+                        else f"muda/inativa (pico={max_vol:.1f}dB)")
+                logger.info(f"Faixa de áudio {i}: {desc}")
+                emit(f"Faixa #{i}: {desc}")
+                if is_active:
                     active_tracks.append(i)
             except Exception as e:
                 logger.warning(f"Erro ao verificar volume da faixa {i}: {e}. Considerando ativa por precaução.")
+                emit(f"Faixa #{i}: não foi possível medir o volume ({e}); considerada ativa.", "warning")
                 active_tracks.append(i)
 
         if not active_tracks:
             logger.warning("Nenhuma faixa ativa detectada acima do limiar. Utilizando faixa 0 como padrão.")
+            emit("Nenhuma faixa com volume acima do limiar. Usando a faixa 0.", "warning")
             return [0]
 
         logger.info(f"Faixas de áudio ativas detectadas ({len(active_tracks)}/{total_streams}): {active_tracks}")
+        emit(f"Faixas ativas: {active_tracks} ({len(active_tracks)}/{total_streams}).", "success")
         return active_tracks
 
     @staticmethod

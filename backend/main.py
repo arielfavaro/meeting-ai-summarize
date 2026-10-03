@@ -182,18 +182,22 @@ async def stream_job_status(job_id: str, jobs: JobRegistry = Depends(get_jobs)):
 
     async def event_generator():
         last_seen = -1.0
+        idle_ticks = 0
         while True:
             job = jobs.get(job_id)
             if not job:
                 break
             if job.updated_at != last_seen:
                 last_seen = job.updated_at
+                idle_ticks = 0
                 yield f"data: {job.model_dump_json()}\n\n"
             else:
-                yield ": keep-alive\n\n"
+                idle_ticks += 1
+                if idle_ticks % 30 == 0:  # ~15s sem mudanças: mantém a conexão viva
+                    yield ": keep-alive\n\n"
             if job.status in FINAL_STATES:
                 break
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

@@ -115,8 +115,12 @@ class TestSinglePass(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm.calls[1]["num_predict"], 1500)
 
     async def test_fallback_when_llm_unavailable(self):
-        req = make_request(context=MeetingContext(objective="Decidir deploy"))
+        progress = []
+        req = make_request(context=MeetingContext(objective="Decidir deploy"),
+                           on_progress=lambda m, lvl="info": progress.append((m, lvl)))
         minutes = await make_generator(FakeLLM(unavailable=True)).generate(req)
+        self.assertEqual(progress[-1][1], "warning")
+        self.assertIn("modo de contingência", progress[-1][0])
         self.assertEqual(minutes.source, "heuristic")
         self.assertTrue(minutes.warnings)
         self.assertTrue(any(d.evidence == [4] for d in minutes.decisions))
@@ -138,10 +142,14 @@ class TestMapReduce(unittest.IsolatedAsyncioTestCase):
         llm = FakeLLM([extraction] * n_chunks + [minutes_payload(speaker_names=[])])
 
         gen = make_generator(llm, max_ctx=6000, num_predict=1000, chunk_tokens=1500)
-        minutes = await gen.generate(make_request(segments=segments))
+        progress = []
+        minutes = await gen.generate(make_request(segments=segments, on_progress=lambda m, lvl="info": progress.append((m, lvl))))
 
         self.assertGreater(n_chunks, 1)
         self.assertEqual(minutes.strategy, "map_reduce")
+        self.assertTrue(any(m.startswith(f"Analisando bloco {n_chunks}/{n_chunks}") for m, _ in progress), progress)
+        self.assertTrue(any(m.startswith("Consolidando") for m, _ in progress))
+        self.assertEqual(progress[-1][1], "success")
         self.assertEqual(len(llm.calls), n_chunks + 1)
         self.assertIn("EXTRAÇÕES DOS BLOCOS", llm.calls[-1]["messages"][1]["content"])
         for call in llm.calls:

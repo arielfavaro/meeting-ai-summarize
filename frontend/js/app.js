@@ -271,16 +271,34 @@ class MeetingApp {
     this.progressFill.style.width = "0%";
     this.currentStepLabel.textContent = "Preparando modelos locais...";
     this.logBox.innerHTML = "";
+    this.lastLogSeq = 0;
+    this.lastStepIdx = 1;
+    this.lastRenderedStep = "";
     for (let i = 1; i <= 5; i++) {
       const step = document.getElementById(`step-${i}`);
-      step.className = "step-item";
+      if (step) step.className = "step-item";
     }
   }
 
   _updateProgressUI(job) {
     this.progressFill.style.width = `${job.progress}%`;
-    this.currentStepLabel.textContent = job.current_step;
-    this._appendLog(`[Progresso ${job.progress}%] ${job.current_step}`);
+    if (job.current_step) {
+      this.currentStepLabel.textContent = job.current_step;
+    }
+
+    // Log em tempo real do backend: renderiza só as entradas novas (seq > última vista).
+    // O backend mantém as últimas 150 linhas, por isso usamos a sequência e não o tamanho da lista.
+    if (Array.isArray(job.logs) && job.logs.length > 0) {
+      job.logs
+        .filter((entry) => entry.seq > (this.lastLogSeq || 0))
+        .forEach((entry) => {
+          this._appendLogLine(`[${entry.time}] ${entry.message}`, entry.level);
+          this.lastLogSeq = entry.seq;
+        });
+    } else if (job.current_step && job.current_step !== this.lastRenderedStep) {
+      this._appendLog(`[Progresso ${job.progress}%] ${job.current_step}`);
+      this.lastRenderedStep = job.current_step;
+    }
 
     const statusMap = {
       preprocessing: 1,
@@ -291,23 +309,34 @@ class MeetingApp {
       completed: 6,
     };
 
-    const currentStepIdx = statusMap[job.status] || 1;
+    // Em falha, destaca a etapa em que o processamento parou
+    const currentStepIdx = job.status === "failed" ? this.lastStepIdx || 1 : statusMap[job.status] || 1;
+    this.lastStepIdx = currentStepIdx;
     for (let i = 1; i <= 5; i++) {
       const step = document.getElementById(`step-${i}`);
+      if (!step) continue;
       if (i < currentStepIdx) {
         step.className = "step-item completed";
       } else if (i === currentStepIdx) {
-        step.className = "step-item active";
+        step.className = job.status === "failed" ? "step-item failed" : "step-item active";
       } else {
         step.className = "step-item";
       }
     }
   }
 
-  _appendLog(text) {
+  _appendLog(text, level = "info") {
+    const time = new Date().toLocaleTimeString("pt-BR");
+    this._appendLogLine(`[${time}] ${text}`, level);
+  }
+
+  /** Linha do log com cor pelo nível informado pelo backend (info | success | warning | error). */
+  _appendLogLine(text, level = "info") {
+    if (!this.logBox) return;
     const line = document.createElement("div");
-    const time = new Date().toLocaleTimeString();
-    line.textContent = `[${time}] ${text}`;
+    const safeLevel = ["info", "success", "warning", "error"].includes(level) ? level : "info";
+    line.className = `log-line log-${safeLevel}`;
+    line.textContent = String(text);
     this.logBox.appendChild(line);
     this.logBox.scrollTop = this.logBox.scrollHeight;
   }
