@@ -35,14 +35,44 @@ def download_whisper(sizes):
         print(f"→ Whisper '{size}'...")
         path = download_model(size, cache_dir=str(settings.MODELS_CACHE_DIR))
         print(f"  ok: {path}")
+    return True
 
 
-def download_speechbrain():
+SPEECHBRAIN_REQUIRED = ("hyperparams.yaml", "embedding_model.ckpt")
+
+
+def _files_ready(target, names) -> bool:
+    """Arquivos presentes e legíveis (symlinks apontando para algo que existe)."""
+    return all((target / n).exists() for n in names)
+
+
+def _replace_symlinks(target) -> int:
+    """
+    Versões antigas do app deixavam symlinks do SpeechBrain apontando para o cache do
+    Hugging Face; o snapshot_download não consegue copiar um arquivo "sobre ele mesmo"
+    (SameFileError). Remove só os links — o conteúdo continua no cache e é recopiado.
+    """
+    removed = 0
+    if target.exists():
+        for entry in target.iterdir():
+            if entry.is_symlink():
+                entry.unlink()
+                removed += 1
+    return removed
+
+
+def download_speechbrain(token=None):
     from huggingface_hub import snapshot_download
     target = settings.speechbrain_model_dir
     print(f"→ SpeechBrain ECAPA-TDNN → {target}")
-    snapshot_download(SPEECHBRAIN_REPO, local_dir=str(target))
+    if _files_ready(target, SPEECHBRAIN_REQUIRED):
+        print("  já presente no disco (nada a baixar)")
+        return True
+    if _replace_symlinks(target):
+        print("  links antigos para o cache substituídos por cópias locais")
+    snapshot_download(SPEECHBRAIN_REPO, local_dir=str(target), token=token or None)
     print("  ok")
+    return True
 
 
 def download_pyannote(token):
@@ -50,6 +80,10 @@ def download_pyannote(token):
     from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
     target = settings.pyannote_model_dir
     print(f"→ pyannote community-1 → {target}")
+    if (target / "config.yaml").exists():
+        print("  já presente no disco (nada a baixar)")
+        return True
+    _replace_symlinks(target)
     try:
         snapshot_download(PYANNOTE_REPO, local_dir=str(target), token=token)
     except GatedRepoError:
@@ -77,20 +111,30 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     settings.ensure_dirs()
-    ok = True
+    results = {}
+
+    def step(name, fn, *fn_args):
+        # Cada modelo é independente: a falha de um não impede o download dos outros.
+        try:
+            results[name] = fn(*fn_args) is not False
+        except Exception as e:  # noqa: BLE001 - relatório amigável no fim
+            print(f"  ✗ {name}: {type(e).__name__}: {e}")
+            results[name] = False
+
     sizes = [s.strip() for s in args.whisper.split(",") if s.strip()]
     if sizes:
-        download_whisper(sizes)
+        step("Whisper", download_whisper, sizes)
     if not args.skip_speechbrain:
-        download_speechbrain()
+        step("SpeechBrain", download_speechbrain, args.hf_token)
     if not args.skip_pyannote:
         if args.hf_token:
-            ok = download_pyannote(args.hf_token) and ok
+            step("pyannote", download_pyannote, args.hf_token)
         else:
             print("→ pyannote ignorado (sem --hf-token). A diarização usará o SpeechBrain.")
 
-    print("\nPronto. Para garantir que nada saia da máquina, mantenha HF_HUB_OFFLINE=1 (padrão do docker-compose).")
-    return 0 if ok else 1
+    print("\nResumo: " + ", ".join(f"{k} {'ok' if v else 'FALHOU'}" for k, v in results.items()))
+    print("Para garantir que nada saia da máquina, mantenha HF_HUB_OFFLINE=1 (padrão do docker-compose).")
+    return 0 if all(results.values()) else 1
 
 
 if __name__ == "__main__":
