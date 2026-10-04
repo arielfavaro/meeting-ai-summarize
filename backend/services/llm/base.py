@@ -1,6 +1,6 @@
 """Contratos (ports) para provedores de LLM — permite trocar Ollama por outro backend ou por fakes em testes."""
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol
 
 
 class LLMError(Exception):
@@ -16,7 +16,8 @@ class LLMResponse:
     content: str
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
-    done_reason: Optional[str] = None  # "stop" | "length" | ...
+    done_reason: Optional[str] = None  # "stop" | "length" | "loop" (abortada por geração degenerada)
+    loop_reason: Optional[str] = None
 
 
 class LLMClient(Protocol):
@@ -29,4 +30,6 @@ class LLMClient(Protocol):
         num_ctx: Optional[int] = None,
         num_predict: Optional[int] = None,
         temperature: float = 0.1,
+        options: Optional[Dict[str, Any]] = None,
+        on_token: Optional[Callable[[int], None]] = None,
     ) -> LLMResponse: ...

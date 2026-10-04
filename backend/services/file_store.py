@@ -2,7 +2,7 @@
 import re
 import uuid
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 from fastapi import UploadFile
 
@@ -33,10 +33,11 @@ def _inside(base: Path, candidate: Path) -> bool:
 
 
 class FileStore:
-    def __init__(self, upload_dir: Path, processed_dir: Path, max_bytes: int):
+    def __init__(self, upload_dir: Path, processed_dir: Path, max_bytes: Optional[int] = None):
         self.upload_dir = upload_dir
         self.processed_dir = processed_dir
-        self.max_bytes = max_bytes
+        # None/0 = sem limite de tamanho (o arquivo é gravado em blocos, sem carregar na memória)
+        self.max_bytes = max_bytes or None
 
     async def save_upload(self, upload: UploadFile) -> Tuple[str, int]:
         ext = Path(upload.filename or "").suffix.lower() or ".wav"
@@ -50,7 +51,7 @@ class FileStore:
             with open(destination, "wb") as buffer:
                 while chunk := await upload.read(CHUNK_SIZE):
                     size += len(chunk)
-                    if size > self.max_bytes:
+                    if self.max_bytes is not None and size > self.max_bytes:
                         raise FileTooLargeError(
                             f"Arquivo excede o limite de {self.max_bytes // (1024 * 1024)}MB.")
                     buffer.write(chunk)

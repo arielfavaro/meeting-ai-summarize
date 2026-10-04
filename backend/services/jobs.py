@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
+from backend import clock
 from backend.models.schemas import JobLogEntry, JobStatus
 
 FINAL_STATES = ("completed", "failed")
@@ -93,7 +94,8 @@ class JobRegistry:
             return
         with self._lock:
             self._seq[job_id] = self._seq.get(job_id, 0) + 1
-            job.logs.append(JobLogEntry(seq=self._seq[job_id], time=datetime.now().strftime("%H:%M:%S"),
+            stamp = clock.now()
+            job.logs.append(JobLogEntry(seq=self._seq[job_id], time=stamp.strftime("%H:%M:%S"), ts=stamp.timestamp(),
                                         level=level, message=message))
             if len(job.logs) > MAX_LOG_LINES:
                 del job.logs[: len(job.logs) - MAX_LOG_LINES]

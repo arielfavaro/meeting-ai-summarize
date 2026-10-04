@@ -348,7 +348,9 @@ class MeetingApp {
       job.logs
         .filter((entry) => entry.seq > (this.lastLogSeq || 0))
         .forEach((entry) => {
-          this._appendLogLine(`[${entry.time}] ${entry.message}`, entry.level);
+          // Horário do navegador (o servidor pode estar em outro fuso, ex.: container em UTC)
+          const time = entry.ts ? new Date(entry.ts * 1000).toLocaleTimeString("pt-BR") : entry.time;
+          this._appendLogLine(`[${time}] ${entry.message}`, entry.level);
           this.lastLogSeq = entry.seq;
         });
     } else if (job.current_step && job.current_step !== this.lastRenderedStep) {

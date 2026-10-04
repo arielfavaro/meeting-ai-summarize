@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     WHISPER_DEVICE: str = "cpu"           # "cpu" ou "cuda"
     WHISPER_COMPUTE_TYPE: str = "int8"    # "int8", "float16", "float32"
     DEFAULT_LANGUAGE: str = "pt"
+    APP_TIMEZONE: str = "America/Sao_Paulo"  # fuso de logs, data da ata e prazos ("amanhã", "sexta")
 
     # Diarização (100% local: os modelos são lidos de diretórios em MODELS_CACHE_DIR)
     # "auto" = pyannote (se o modelo estiver baixado) → SpeechBrain → acústico
@@ -64,11 +65,15 @@ class Settings(BaseSettings):
     HF_TOKEN: str = ""                  # usado SOMENTE pelo script de download (uma vez); nunca em processamento
     ENABLE_PYANNOTE: bool = False       # legado: equivale a DIARIZATION_ENGINE=pyannote
 
+    # Multi-faixa (OBS): faixa com um locutor dominante vira 1 locutor; eco entre faixas é removido
+    MULTITRACK_DOMINANT_SHARE: float = 0.8   # 0 desativa
+    MULTITRACK_DEDUPE_ECHO: bool = True
+
     # GPU: liberar Whisper/diarização da VRAM antes da etapa seguinte (None = automático: só em CUDA)
     RELEASE_MODELS_AFTER_USE: Optional[bool] = None
 
     # Limites e execução
-    MAX_FILE_SIZE_MB: int = 500
+    MAX_FILE_SIZE_MB: int = 0             # 0 = sem limite de tamanho no upload
     MAX_CONCURRENT_JOBS: int = 1          # pipelines pesados simultâneos (GPU/CPU)
     JOB_RETENTION_SECONDS: int = 3600     # tempo que jobs finalizados ficam consultáveis
 

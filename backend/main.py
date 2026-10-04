@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
+from backend import clock
 from backend.config import settings
 from backend.database import MeetingRepository
 from backend.dependencies import (
@@ -87,9 +88,9 @@ def _load_meeting(repo: MeetingRepository, meeting_id: str) -> MeetingDetail:
 
 def _meeting_date(meeting: MeetingDetail) -> datetime:
     try:
-        return datetime.fromisoformat(meeting.created_at)
+        return clock.to_app_tz(datetime.fromisoformat(meeting.created_at))
     except ValueError:
-        return datetime.now().astimezone()
+        return clock.now()
 
 
 async def _regenerate(meeting: MeetingDetail, minutes: MinutesGenerator, model: Optional[str],
@@ -385,7 +386,7 @@ def _safe_title(title: str) -> str:
 async def export_meeting(meeting_id: str, format: str, repo: MeetingRepository = Depends(get_repo)):
     """Exporta a ata para Markdown (.md), Word (.docx) ou Texto (.txt)."""
     meeting = present_meeting(_load_meeting(repo, meeting_id))
-    filename_base = f"Ata_{_safe_title(meeting.title)}_{datetime.now().strftime('%Y%m%d')}"
+    filename_base = f"Ata_{_safe_title(meeting.title)}_{clock.now().strftime('%Y%m%d')}"
 
     if format == "md":
         return Response(content=ExporterService.to_markdown(meeting), media_type="text/markdown; charset=utf-8",
@@ -407,7 +408,7 @@ async def export_meeting_transcript(meeting_id: str, format: str, repo: MeetingR
     meeting = present_meeting(_load_meeting(repo, meeting_id))
     if not meeting.segments:
         raise HTTPException(status_code=400, detail="Reunião não possui transcrição disponível.")
-    filename_base = f"Transcricao_{_safe_title(meeting.title)}_{datetime.now().strftime('%Y%m%d')}"
+    filename_base = f"Transcricao_{_safe_title(meeting.title)}_{clock.now().strftime('%Y%m%d')}"
 
     if format == "md":
         return Response(content=ExporterService.transcript_to_markdown(meeting), media_type="text/markdown; charset=utf-8",

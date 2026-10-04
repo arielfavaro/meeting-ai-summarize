@@ -243,3 +243,35 @@ class TestJobPersistence(unittest.TestCase):
         self.assertIn("reinício", loaded.error)
         self.assertEqual(loaded.request["file_id"], FILE_ID)
         self.assertEqual(loaded.logs[-1].message, "Transcrevendo...")
+
+
+class FakeTwoTrackAudio(FakeAudio):
+    @staticmethod
+    def detect_active_audio_tracks(path, log_callback=None):
+        return [2, 3]
+
+    @staticmethod
+    def extract_track_to_wav_16k(src, track_no, dst):
+        dst.write_bytes(b"RIFF")
+
+
+class TestMultitrackPipeline(_PipelineBase):
+    async def test_mic_track_collapses_to_one_speaker(self):
+        # Faixa 2 = microfone (voz dominante + 2 "locutores" de ruído); faixa 3 = chamada
+        mic_turns = [{"start": 0.0, "end": 9.0, "speaker": "Locutor 1"},
+                     {"start": 9.0, "end": 9.5, "speaker": "Locutor 2"},
+                     {"start": 9.5, "end": 19.0, "speaker": "Locutor 1"},
+                     {"start": 19.0, "end": 19.4, "speaker": "Locutor 3"}]
+        self.diarizer_turns = mic_turns
+        self.pipeline.audio = FakeTwoTrackAudio
+        job = self.jobs.create()
+        await self.pipeline.run(job.job_id, FILE_ID, "Multi", ProcessOptions())
+        done = self.jobs.get(job.job_id)
+        self.assertEqual(done.status, "completed", done.error)
+        messages = [e.message for e in done.logs]
+        self.assertTrue(any("Canal individual" in m and "3 locutores" in m for m in messages), messages)
+        meeting = self.repo.get(done.meeting_id)
+        # Os dublês devolvem a MESMA transcrição nas duas faixas: tudo é eco e cada fala aparece
+        # uma vez só (sem duplicar a reunião inteira).
+        self.assertTrue(any("eco entre faixas" in m for m in messages), messages)
+        self.assertEqual(len(meeting.segments), len(sample_segments()))

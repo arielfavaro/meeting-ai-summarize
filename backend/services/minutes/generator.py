@@ -11,6 +11,7 @@ Geração da ata com LLM local — pipeline "contexto → extração com evidên
 import json
 import logging
 import re
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -19,6 +20,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple, Type, TypeVa
 
 from pydantic import BaseModel, ValidationError
 
+from backend import clock
 from backend.models.schemas import (
     ActionItem, Decision, MeetingContext, MeetingMinutes, Objective, OpenPoint, SpeakerSegment, TopicItem,
 )
@@ -26,6 +28,7 @@ from backend.services.llm.base import LLMClient, LLMError
 from backend.services.minutes import prompts
 from backend.services.minutes.deadline_resolver import resolve_deadline
 from backend.services.minutes.heuristic import generate_heuristic_minutes
+from backend.services.minutes.json_salvage import fill_missing_fields, salvage_json, substantive_items
 from backend.services.minutes.llm_schemas import (
     EXTRACT_LIST_LIMITS, FINAL_LIST_LIMITS, LIMITS, LLMExtraction, LLMMinutes, max_output_tokens, schema_for,
 )
@@ -91,6 +94,42 @@ def _norm(text: str) -> str:
 
 def _similar(a: str, b: str, threshold: float = 0.85) -> bool:
     return SequenceMatcher(None, _norm(a), _norm(b)).ratio() >= threshold
+
+
+ANTI_LOOP_OPTIONS = {"repeat_penalty": 1.15, "repeat_last_n": 256}
+ANTI_LOOP_TEMPERATURE = 0.35
+
+
+class _ProgressTicker:
+    """Mostra no log que o LLM continua gerando (a cada ~45s), em vez de minutos de silêncio."""
+
+    def __init__(self, emit: Callable[..., None], every: float = 45.0):
+        self.emit, self.every = emit, every
+        self.started = self.last = time.monotonic()
+
+    def __call__(self, chunks: int) -> None:
+        now = time.monotonic()
+        if now - self.last >= self.every:
+            self.last = now
+            self.emit(f"LLM gerando... ~{chunks} tokens em {now - self.started:.0f}s.")
+
+
+def _merge_partials(partials: List[Dict], title: str) -> LLMMinutes:
+    """Ata a partir das extrações dos blocos (usada se a consolidação pelo LLM falhar)."""
+    def gather(key: str) -> List[Dict]:
+        return [item for p in partials for item in p.get(key, [])]
+
+    return LLMMinutes(
+        title=title,
+        executive_summary="",
+        objectives=gather("objectives"),
+        topics=gather("topics"),
+        decisions=gather("decisions"),
+        action_items=gather("action_items"),
+        open_points=gather("open_points"),
+        risks=gather("risks"),
+        speaker_names=gather("speaker_names"),
+    )
 
 
 def _parse_json(raw: str) -> dict:
@@ -213,10 +252,20 @@ class MinutesGenerator:
         for i, (chunk, messages) in enumerate(zip(chunks, all_messages), 1):
             span = f"{format_timestamp(chunk[0].start)} a {format_timestamp(chunk[-1].end)}"
             req.emit(f"Analisando bloco {i}/{len(chunks)} ({span})...")
-            extraction, w = await self._call_structured(messages, LLMExtraction, extract_schema, model, req,
-                                                        num_ctx, extract_budget)
+            try:
+                extraction, w = await self._call_structured(messages, LLMExtraction, extract_schema, model, req,
+                                                            num_ctx, extract_budget)
+            except MinutesGenerationError as e:
+                # Um bloco problemático não derruba a ata inteira: os demais continuam.
+                msg = f"O trecho {span} (bloco {i}) não pôde ser analisado pelo LLM e ficou de fora da ata."
+                logger.warning("%s Motivo: %s", msg, e)
+                warnings.append(msg)
+                req.emit(msg, "warning")
+                continue
             warnings += w
             partials.append({"bloco": i, "intervalo": span, **extraction.model_dump()})
+        if not partials:
+            raise MinutesGenerationError("nenhum bloco da reunião pôde ser analisado pelo LLM")
 
         def reduce_messages() -> List[Dict[str, str]]:
             payload = json.dumps(partials, ensure_ascii=False)
@@ -233,40 +282,64 @@ class MinutesGenerator:
 
         needed = self._prompt_tokens(messages) + final_budget
         reduce_ctx = num_ctx if needed <= num_ctx else self._bucket(needed)
-        req.emit(f"Consolidando {len(chunks)} blocos em uma ata única...")
-        final, w = await self._call_structured(messages, LLMMinutes, final_schema, model, req, reduce_ctx, final_budget)
+        req.emit(f"Consolidando {len(partials)} blocos em uma ata única...")
+        try:
+            final, w = await self._call_structured(messages, LLMMinutes, final_schema, model, req, reduce_ctx,
+                                                   final_budget)
+        except MinutesGenerationError as e:
+            # Sem a consolidação, a ata ainda pode ser montada com o que os blocos extraíram
+            # (a verificação deduplica) — muito melhor que o modo de contingência por palavras-chave.
+            logger.warning("Consolidação falhou (%s); montando a ata a partir dos blocos.", e)
+            msg = "A consolidação pelo LLM falhou; a ata foi montada a partir dos itens extraídos de cada bloco."
+            req.emit(msg, "warning")
+            return _merge_partials(partials, req.title), warnings + [msg]
         return final, warnings + w
 
     async def _call_structured(self, messages: List[Dict[str, str]], model_cls: Type[T], schema: Dict,
                                model: str, req: Optional[MinutesRequest], num_ctx: int,
                                num_predict: int) -> Tuple[T, List[str]]:
         """
-        Chamada com saída estruturada. `num_ctx` fica FIXO entre as tentativas (mudar faz o Ollama
-        recarregar o modelo); só cresce no caso raro de o backend ignorar os limites do schema.
+        Chamada com saída estruturada, sem retrabalho desnecessário:
+        - `num_ctx`/`num_predict` ficam FIXOS (mudar faz o Ollama recarregar o modelo, e pedir
+          mais tokens não resolve um modelo em laço);
+        - geração degenerada é abortada cedo pelo streaming (LoopGuard);
+        - resposta cortada é APROVEITADA quando o JSON parcial tem conteúdo útil;
+        - se não der, nova tentativa com penalidade de repetição (quebra o laço).
         """
         emit = req.emit if req else (lambda *a, **k: None)
         warnings: List[str] = []
         convo = list(messages)
         last_error: Optional[str] = None
+        anti_loop = False
 
         for attempt in range(self.cfg.max_retries + 1):
+            started = time.monotonic()
+            ticker = _ProgressTicker(emit)
             resp = await self.llm.chat(
                 convo, model, schema=schema, num_ctx=num_ctx, num_predict=num_predict,
-                temperature=self.cfg.temperature,
+                temperature=ANTI_LOOP_TEMPERATURE if anti_loop else self.cfg.temperature,
+                options=ANTI_LOOP_OPTIONS if anti_loop else None,
+                on_token=ticker,
             )
-            if resp.completion_tokens:
-                logger.info("LLM: %s tokens gerados (orçamento %d, num_ctx %d).", resp.completion_tokens, num_predict, num_ctx)
-            if resp.done_reason == "length":
-                # Só acontece se o backend não aplicou maxItems/maxLength do schema.
-                last_error = "resposta cortada pelo limite de tokens (num_predict)"
-                num_predict = int(num_predict * 1.5)
-                needed = self._prompt_tokens(messages) + num_predict
-                if needed > num_ctx:
-                    num_ctx = self._bucket(needed)
-                if attempt < self.cfg.max_retries:
-                    emit(f"Resposta cortada pelo limite de tokens (o modelo ignorou os limites do schema); "
-                         f"nova tentativa com num_predict={num_predict}, contexto {num_ctx}.", "warning")
+            logger.info("LLM: %s tokens em %.0fs (motivo=%s, orçamento %d, num_ctx %d).", resp.completion_tokens,
+                        time.monotonic() - started, resp.done_reason, num_predict, num_ctx)
+
+            if resp.done_reason in ("length", "loop"):
+                cause = (f"geração em laço ({resp.loop_reason})" if resp.done_reason == "loop"
+                         else "resposta cortada pelo limite de tokens")
+                logger.warning("%s. Início: %r ... Fim: %r", cause, resp.content[:200], resp.content[-300:])
+                salvaged = self._salvage(resp.content, model_cls)
+                if salvaged is not None:
+                    msg = f"{cause.capitalize()}; o conteúdo já gerado foi aproveitado (pode estar incompleto)."
+                    warnings.append(msg)
+                    emit(msg, "warning")
+                    return salvaged, warnings
+                last_error = cause
+                anti_loop = True
                 convo = list(messages)
+                if attempt < self.cfg.max_retries:
+                    emit(f"{cause.capitalize()}; nova tentativa ({attempt + 2}/{self.cfg.max_retries + 1}) "
+                         "com penalidade de repetição.", "warning")
                 continue
             try:
                 return model_cls.model_validate(_parse_json(resp.content)), warnings
@@ -282,6 +355,17 @@ class MinutesGenerator:
                 ]
         raise MinutesGenerationError(f"LLM não produziu ata válida após {self.cfg.max_retries + 1} tentativas: {last_error}")
 
+    @staticmethod
+    def _salvage(content: str, model_cls: Type[T]) -> Optional[T]:
+        data = salvage_json(content)
+        if data is None:
+            return None
+        try:
+            obj = model_cls.model_validate(fill_missing_fields(data, model_cls))
+        except ValidationError:
+            return None
+        return obj if substantive_items(obj) > 0 else None
+
     # ----------------------------------------------------------- verificação
     def _finalize(self, r: LLMMinutes, req: MinutesRequest, model: str, strategy: str,
                   warnings: List[str]) -> MeetingMinutes:
@@ -293,8 +377,9 @@ class MinutesGenerator:
             return sorted({int(i) for i in ids if int(i) in valid_ids})[: LIMITS["evidence"]]
 
         # Se o backend não aplicou os maxItems do schema, corta aqui (protege contra laços degenerados).
+        # Folga de 4x: a ata montada a partir dos blocos (sem consolidação) junta vários blocos.
         for key, limit in FINAL_LIST_LIMITS.items():
-            setattr(r, key, getattr(r, key)[:limit])
+            setattr(r, key, getattr(r, key)[: limit * 4])
 
         name_to_label = {_norm(n): sid for sid, n in req.speaker_map.items() if n and n != sid}
 
@@ -380,7 +465,7 @@ class MinutesGenerator:
             prompt_version=prompts.PROMPT_VERSION,
             strategy=strategy,
             warnings=warnings,
-            generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+            generated_at=clock.now().isoformat(timespec="seconds"),
         )
 
     def _heuristic(self, req: MinutesRequest, reason: str) -> MeetingMinutes:

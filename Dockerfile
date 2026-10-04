@@ -9,6 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
+    tzdata \
     curl \
     build-essential \
     git \

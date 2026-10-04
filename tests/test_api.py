@@ -86,6 +86,20 @@ class TestFileSecurity(APITestCase):
         self.assertEqual(r.status_code, 413)
         self.assertEqual(list((self.tmp / "uploads").iterdir()), [])  # arquivo parcial removido
 
+    def test_upload_without_limit_accepts_large_file(self):
+        self.files.max_bytes = None  # padrão: MAX_FILE_SIZE_MB=0 (sem limite)
+        payload = b"0" * (3 * 1024 * 1024 + 7)  # maior que vários blocos de leitura
+        r = self.client.post("/api/upload", files={"file": ("grande.wav", payload, "audio/wav")})
+        self.assertEqual(r.status_code, 200, r.text)
+        saved = list((self.tmp / "uploads").iterdir())
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].stat().st_size, len(payload))
+
+    def test_zero_limit_means_unlimited(self):
+        from backend.services.file_store import FileStore
+        self.assertIsNone(FileStore(self.tmp, self.tmp, 0).max_bytes)
+        self.assertIsNone(FileStore(self.tmp, self.tmp).max_bytes)
+
 
 class TestSpeakers(APITestCase):
     def test_resolve_labels_does_not_touch_longer_ids(self):

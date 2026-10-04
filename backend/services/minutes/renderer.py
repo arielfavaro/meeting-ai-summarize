@@ -2,6 +2,7 @@
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from backend.clock import to_app_tz
 from backend.models.schemas import MeetingDetail
 
 OBJECTIVE_STATUS_LABEL = {
@@ -17,7 +18,7 @@ def format_datetime(value: Optional[str]) -> str:
     if not value:
         return "--"
     try:
-        return datetime.fromisoformat(value).strftime("%d/%m/%Y %H:%M")
+        return to_app_tz(datetime.fromisoformat(value)).strftime("%d/%m/%Y %H:%M")
     except ValueError:
         return value
 

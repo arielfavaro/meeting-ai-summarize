@@ -3,6 +3,7 @@ import re
 from datetime import datetime
 from typing import List, Optional, Sequence
 
+from backend import clock
 from backend.models.schemas import (
     ActionItem, Decision, MeetingContext, MeetingMinutes, Objective, SpeakerSegment, TopicItem,
 )
@@ -59,5 +60,5 @@ def generate_heuristic_minutes(
         source="heuristic",
         strategy="heuristic",
         warnings=[f"Ata gerada sem LLM ({reason}). Itens extraídos por palavras-chave podem conter falsos positivos."],
-        generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        generated_at=clock.now().isoformat(timespec="seconds"),
     )

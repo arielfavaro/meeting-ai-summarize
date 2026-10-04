@@ -16,9 +16,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+from backend import clock
 from backend.models.schemas import MeetingDetail, MeetingSource, ProcessOptions, RediarizeRequest, SpeakerSegment
 from backend.services.artifacts import ArtifactStore
 from backend.services.speaker_editing import carry_speaker_names
+from backend.services.multitrack import collapse_dominant_speaker, remove_cross_track_echo
 from backend.services.alignment import align_transcription_with_diarization, merge_multitrack_segments
 from backend.services.audio_service import AudioService
 from backend.services.diarization import DiarizationService
@@ -76,6 +78,8 @@ class MeetingPipeline:
         transcriber=TranscriptionService,
         audio=AudioService,
         release_models: bool = False,
+        multitrack_dominant_share: float = 0.8,
+        multitrack_dedupe_echo: bool = True,
     ):
         self.jobs = jobs
         self.files = files
@@ -87,6 +91,8 @@ class MeetingPipeline:
         self.transcriber = transcriber
         self.audio = audio
         self.release_models = release_models
+        self.multitrack_dominant_share = multitrack_dominant_share
+        self.multitrack_dedupe_echo = multitrack_dedupe_echo
 
     # ------------------------------------------------------------ casos de uso
     async def run(self, job_id: str, file_id: str, title: str, options: ProcessOptions) -> None:
@@ -118,7 +124,7 @@ class MeetingPipeline:
             file_id, raw_audio_path, tracks, wav_path, diarizer, options.min_speakers, options.max_speakers,
             options.whisper_model, options.language, terms, reporter)
 
-        created_at = datetime.now().astimezone()
+        created_at = clock.now()
         speaker_ids = list(dict.fromkeys(s.speaker_id for s in aligned))
         meeting = MeetingDetail(
             id=str(uuid.uuid4()),
@@ -239,6 +245,19 @@ class MeetingPipeline:
                 self.artifacts.save(file_id, "diarization", params, cached)
             diarizations[t] = cached["turns"]
             engines_used.add(cached.get("engine"))
+
+        # Faixa de microfone individual: um locutor dominante = um locutor só (o resto é ruído/vazamento).
+        single_speaker_tracks = set()
+        if multi:
+            for i, t in enumerate(tracks):
+                before = len({x["speaker"] for x in diarizations[t]})
+                diarizations[t], share = collapse_dominant_speaker(diarizations[t], self.multitrack_dominant_share)
+                if share is not None:
+                    single_speaker_tracks.add(i)
+                    reporter.log(f"{labels[t]}Canal individual: {share:.0%} da fala é de uma só voz — "
+                                 f"{before} locutores detectados tratados como 1.", "success")
+                elif before == 1:
+                    single_speaker_tracks.add(i)
         if self.release_models:
             await asyncio.to_thread(diarizer.release)
 
@@ -267,6 +286,11 @@ class MeetingPipeline:
         # 3) Alinhamento por frase e intercalação das faixas
         reporter.step("Sincronizando falas e locutores (atribuição por frase)...", status="aligning", progress=75)
         per_track = [align_transcription_with_diarization(transcriptions[t], diarizations[t]) for t in tracks]
+        if multi and self.multitrack_dedupe_echo:
+            per_track, removed = remove_cross_track_echo(per_track, single_speaker_tracks)
+            if removed:
+                reporter.log(f"{removed} fala(s) duplicada(s) por eco entre faixas removida(s) "
+                             "(microfone captando o alto-falante).", "success")
         aligned = merge_multitrack_segments(per_track) if multi else per_track[0]
         speakers = len({s.speaker_id for s in aligned})
         reporter.step(f"Alinhamento concluído: {len(aligned)} falas, {speakers} locutor(es).", progress=80,
@@ -298,6 +322,6 @@ class MeetingPipeline:
 
 def _meeting_date(meeting: MeetingDetail) -> datetime:
     try:
-        return datetime.fromisoformat(meeting.created_at)
+        return clock.to_app_tz(datetime.fromisoformat(meeting.created_at))
     except ValueError:
-        return datetime.now().astimezone()
+        return clock.now()

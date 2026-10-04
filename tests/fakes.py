@@ -14,9 +14,10 @@ class FakeLLM:
         self.unavailable = unavailable
         self.calls: List[Dict[str, Any]] = []
 
-    async def chat(self, messages, model, *, schema=None, num_ctx=None, num_predict=None, temperature=0.1):
-        self.calls.append({"messages": messages, "model": model, "schema": schema,
-                           "num_ctx": num_ctx, "num_predict": num_predict})
+    async def chat(self, messages, model, *, schema=None, num_ctx=None, num_predict=None, temperature=0.1,
+                   options=None, on_token=None):
+        self.calls.append({"messages": messages, "model": model, "schema": schema, "num_ctx": num_ctx,
+                           "num_predict": num_predict, "temperature": temperature, "options": options})
         if self.unavailable:
             raise LLMUnavailableError("Ollama offline (fake)")
         item = self.responses.pop(0)

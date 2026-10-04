@@ -133,13 +133,27 @@ class TestSinglePass(unittest.IsolatedAsyncioTestCase):
         await make_generator(llm).generate(make_request())
         self.assertEqual(llm.calls[0]["num_ctx"], llm.calls[1]["num_ctx"])
 
-    async def test_truncated_output_increases_budget(self):
-        truncated = LLMResponse(content='{"objectives": [', done_reason="length")
-        llm = FakeLLM([truncated, minutes_payload()])
+    async def test_truncated_output_is_salvaged_without_regenerating(self):
+        full = json.dumps(minutes_payload(), ensure_ascii=False)
+        cut = full[: full.index('"open_points"') + 30]  # cortada no meio dos pontos em aberto
+        llm = FakeLLM([LLMResponse(content=cut, done_reason="length")])
         minutes = await make_generator(llm).generate(make_request())
-        self.assertEqual(llm.calls[1]["num_predict"], int(llm.calls[0]["num_predict"] * 1.5))
-        self.assertGreaterEqual(llm.calls[1]["num_ctx"], llm.calls[1]["num_predict"])
+        self.assertEqual(len(llm.calls), 1)  # nada de refazer do zero
         self.assertEqual(minutes.source, "llm")
+        self.assertTrue(minutes.decisions and minutes.action_items)
+        self.assertTrue(any("aproveitado" in w for w in minutes.warnings))
+
+    async def test_loop_retries_with_anti_repetition_and_same_window(self):
+        loop = LLMResponse(content='{"objectives": [' + " " * 200, done_reason="loop", loop_reason="espaços")
+        llm = FakeLLM([loop, minutes_payload()])
+        minutes = await make_generator(llm).generate(make_request())
+        self.assertEqual(minutes.source, "llm")
+        first, second = llm.calls
+        self.assertIsNone(first["options"])
+        self.assertEqual(second["options"]["repeat_penalty"], 1.15)
+        self.assertGreater(second["temperature"], first["temperature"])
+        # janela e orçamento fixos: sem recarregar o modelo e sem gerar mais do mesmo laço
+        self.assertEqual((first["num_ctx"], first["num_predict"]), (second["num_ctx"], second["num_predict"]))
 
     async def test_lists_are_trimmed_if_backend_ignores_schema_limits(self):
         payload = minutes_payload(decisions=[{"description": f"Decisão {i}", "evidence": [4]} for i in range(40)])
@@ -192,6 +206,38 @@ class TestMapReduce(unittest.IsolatedAsyncioTestCase):
             self.assertLessEqual(call["num_ctx"], 16384)
             self.assertLessEqual(call["num_predict"], call["num_ctx"])
         self.assertIn("até 3 objetivos, 4 tópicos", llm.calls[0]["messages"][0]["content"])  # limites por bloco
+
+    def _long_segments(self):
+        return [seg(i, i * 5.0, f"Locutor {1 + i % 2}", "Discussão longa sobre o projeto " * 8) for i in range(1, 201)]
+
+    async def test_failed_block_is_skipped_not_the_whole_minutes(self):
+        segments = self._long_segments()
+        n_chunks = len(chunk_segments(segments, 3000))
+        extraction = {k: v for k, v in minutes_payload().items() if k not in ("title", "executive_summary")}
+        extraction["speaker_names"] = []
+        loop = LLMResponse(content="{", done_reason="loop", loop_reason="repetição")
+        # bloco 1 falha nas 3 tentativas; demais blocos e consolidação funcionam
+        llm = FakeLLM([loop, loop, loop] + [extraction] * (n_chunks - 1) + [minutes_payload(speaker_names=[])])
+        progress = []
+        minutes = await make_generator(llm, max_ctx=16384, chunk_tokens=3000).generate(
+            make_request(segments=segments, on_progress=lambda m, lvl="info": progress.append((m, lvl))))
+        self.assertEqual(minutes.source, "llm")
+        self.assertTrue(any("bloco 1" in w for w in minutes.warnings), minutes.warnings)
+        self.assertTrue(any(m.startswith(f"Consolidando {n_chunks - 1} blocos") for m, _ in progress))
+
+    async def test_failed_consolidation_builds_minutes_from_blocks(self):
+        segments = self._long_segments()
+        n_chunks = len(chunk_segments(segments, 3000))
+        extraction = {k: v for k, v in minutes_payload().items() if k not in ("title", "executive_summary")}
+        extraction["speaker_names"] = []
+        bad = LLMResponse(content="{", done_reason="loop", loop_reason="repetição")
+        llm = FakeLLM([extraction] * n_chunks + [bad, bad, bad])
+        minutes = await make_generator(llm, max_ctx=16384, chunk_tokens=3000).generate(make_request(segments=segments))
+        self.assertEqual(minutes.source, "llm")  # não caiu no modo de contingência por palavras-chave
+        self.assertEqual(minutes.title, "Reunião")
+        self.assertTrue(minutes.decisions)
+        self.assertEqual(len(minutes.action_items), 2)  # itens repetidos entre blocos foram unidos
+        self.assertTrue(any("consolidação" in w for w in minutes.warnings))
 
     def test_chunks_overlap_and_respect_budget(self):
         segments = [seg(i, float(i), "Locutor 1", "palavra " * 30) for i in range(1, 41)]

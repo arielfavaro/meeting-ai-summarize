@@ -24,7 +24,7 @@ def get_jobs() -> JobRegistry:
 @lru_cache(maxsize=1)
 def get_file_store() -> FileStore:
     settings.ensure_dirs()
-    return FileStore(settings.UPLOAD_DIR, settings.PROCESSED_DIR, settings.MAX_FILE_SIZE_MB * 1024 * 1024)
+    return FileStore(settings.UPLOAD_DIR, settings.PROCESSED_DIR, (settings.MAX_FILE_SIZE_MB * 1024 * 1024) or None)
 
 
 @lru_cache(maxsize=1)
@@ -54,4 +54,6 @@ def get_pipeline() -> MeetingPipeline:
         processed_dir=settings.PROCESSED_DIR,
         artifacts=get_artifacts(),
         release_models=settings.release_models_after_use,
+        multitrack_dominant_share=settings.MULTITRACK_DOMINANT_SHARE,
+        multitrack_dedupe_echo=settings.MULTITRACK_DEDUPE_ECHO,
     )

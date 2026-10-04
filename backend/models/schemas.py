@@ -234,7 +234,8 @@ LogLevel = Literal["info", "success", "warning", "error"]
 
 class JobLogEntry(BaseModel):
     seq: int          # sequência monotônica: o frontend renderiza só o que ainda não viu
-    time: str         # HH:MM:SS
+    time: str         # HH:MM:SS no fuso da aplicação
+    ts: float = 0.0   # epoch (a interface formata no horário do navegador)
     level: LogLevel = "info"
     message: str
 

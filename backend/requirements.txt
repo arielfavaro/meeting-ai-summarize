@@ -27,5 +27,8 @@ speechbrain>=1.0.3
 pyannote.audio>=4.0.4,<5
 huggingface-hub>=0.28.1
 
+# Base de fusos horários (o container slim não traz; usada pelo APP_TIMEZONE)
+tzdata
+
 # Exportação de Documentos
 python-docx>=1.1.0
