@@ -28,7 +28,14 @@ services:
       - DEFAULT_LANGUAGE=${DEFAULT_LANGUAGE:-pt}
       - HF_TOKEN=${HF_TOKEN:-}
       - ENABLE_PYANNOTE=${ENABLE_PYANNOTE:-false}
+      - DIARIZATION_ENGINE=${DIARIZATION_ENGINE:-auto}
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
+      # Privacidade: modelos só do disco local e nenhuma telemetria.
+      # Para baixar modelos (uma vez): docker compose run --rm -e HF_HUB_OFFLINE=0 app python -m backend.scripts.download_models
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
       - HF_HUB_DISABLE_TELEMETRY=1
+      - PYANNOTE_METRICS_ENABLED=0
+      - DO_NOT_TRACK=1
     depends_on:
       - ollama
     networks:

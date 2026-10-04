@@ -5,9 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MeetingAI | Transcrição, Diarização e Atas com IA Local</title>
   <meta name="description" content="Sistema 100% local com Docker para transcrição de reuniões, separação de locutores e geração automatizada de atas em Português do Brasil com Faster-Whisper e Ollama.">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Sem fontes/CDNs externos: a interface não faz nenhuma requisição para fora da máquina -->
   <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
@@ -268,6 +266,12 @@
         <div class="log-box" id="job-log-box">
           [Sistema]: Pronto para processamento.
         </div>
+
+        <!-- Falha: mensagem + retomar reaproveitando as etapas concluídas -->
+        <div class="job-actions" id="job-actions" style="display: none;">
+          <span class="job-error-text" id="job-error-text"></span>
+          <button class="btn btn-primary btn-sm" id="btn-retry-job">🔁 Tentar novamente</button>
+        </div>
       </div>
     </section>
 
@@ -460,6 +464,24 @@
 
         <div class="speakers-list-inputs" id="speakers-inputs-container">
           <!-- Dinâmico -->
+        </div>
+
+        <!-- Correções de locutores: mesclar e refazer a separação -->
+        <div class="speaker-tools" id="speaker-tools" style="display: none;">
+          <div class="speaker-tool">
+            <span>Mesclar</span>
+            <select id="merge-source" class="form-select form-select-sm" aria-label="Locutor de origem"></select>
+            <span>em</span>
+            <select id="merge-target" class="form-select form-select-sm" aria-label="Locutor de destino"></select>
+            <button class="btn btn-secondary btn-sm" onclick="app.mergeSpeakers()">Mesclar</button>
+          </div>
+          <div class="speaker-tool" id="rediarize-tool">
+            <span>Refazer separação com</span>
+            <input type="number" id="rediarize-count" class="form-input form-input-sm" min="1" max="20" placeholder="auto" aria-label="Número de pessoas">
+            <span>pessoa(s)</span>
+            <button class="btn btn-secondary btn-sm" onclick="app.rediarize()">Refazer</button>
+          </div>
+          <span class="form-hint">Para corrigir um trecho específico, use o seletor ao lado do nome na fala.</span>
         </div>
         <div class="speaker-suggestions" id="speaker-suggestions-container"></div>
       </div>

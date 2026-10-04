@@ -4,31 +4,28 @@ uvicorn[standard]>=0.28.0
 python-multipart>=0.0.9
 pydantic>=2.6.0
 pydantic-settings>=2.2.0
-requests>=2.31.0
 httpx>=0.27.0
-aiofiles>=23.2.1
 
-# Processamento de Áudio e IA
-faster-whisper>=1.0.1
-torch>=2.1.0
-torchaudio>=2.1.0
+# Processamento de Áudio e IA (tudo roda localmente; modelos ficam em data/models_cache)
+faster-whisper>=1.1.0
+# torch 2.8–2.10: builds CUDA 12 (compatíveis com o CTranslate2/Faster-Whisper e cuDNN 9).
+# A partir do 2.11 o PyPI usa CUDA 13 e o torchaudio foi descontinuado — não atualizar sem testar a GPU.
+torch>=2.8.0,<2.11
+torchaudio>=2.8.0,<2.11
+torchcodec>=0.7,<0.11
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
-numpy>=1.24.0,<2.0.0
-scipy>=1.11.0
+numpy>=2.2.2,<3
+scipy>=1.15.1
 soundfile>=0.12.1
-librosa>=0.10.1
+librosa>=0.11.0
 
-# Diarização de Locutores 100% Local & Clustering
-scikit-learn>=1.3.0
-speechbrain>=1.0.0
-pyannote.audio>=3.1.1
-huggingface-hub>=0.20.0
+# Diarização de Locutores 100% Local
+# pyannote.audio 4.x: pipeline community-1 (lido de diretório local; telemetria desligada no código)
+scikit-learn>=1.6.1
+speechbrain>=1.0.3
+pyannote.audio>=4.0.4,<5
+huggingface-hub>=0.28.1
 
 # Exportação de Documentos
 python-docx>=1.1.0
-markdown>=3.5.0
-
-# Utilitários e Banco Local
-python-dotenv>=1.0.1
-sqlalchemy>=2.0.28

@@ -1319,3 +1319,89 @@ main {
 @media print {
   .evidence-chips, .speaker-suggestions { display: none !important; }
 }
+
+/* ==========================================================================
+   Retomar processamento e edição de locutores
+   ========================================================================== */
+.job-actions {
+  margin-top: 1rem;
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(244, 63, 94, 0.35);
+  background: rgba(244, 63, 94, 0.08);
+}
+
+.job-error-text {
+  color: #fda4af;
+  font-size: 0.85rem;
+  text-align: left;
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.speaker-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+  align-items: center;
+  margin-top: 0.85rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.speaker-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+
+.form-select-sm, .form-input-sm {
+  padding: 0.3rem 0.5rem;
+  font-size: 0.8rem;
+  width: auto;
+  min-width: 0;
+}
+
+.form-input-sm { width: 4.5rem; }
+
+.speaker-reassign {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  max-width: 11rem;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  cursor: pointer;
+}
+
+.utterance-bubble:hover .speaker-reassign,
+.speaker-reassign:focus {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .speaker-reassign { opacity: 1; }
+}
+
+@media print {
+  .speaker-reassign, .speaker-tools, .job-actions { display: none !important; }
+}
+
+.speaker-name-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}

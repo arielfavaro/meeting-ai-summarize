@@ -11,9 +11,11 @@ logger = logging.getLogger(__name__)
 
 
 class OllamaClient:
-    def __init__(self, base_url: str, timeout: float = 900.0, transport: Optional[httpx.AsyncBaseTransport] = None):
+    def __init__(self, base_url: str, timeout: float = 900.0, transport: Optional[httpx.AsyncBaseTransport] = None,
+                 keep_alive: Optional[str] = None):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.keep_alive = keep_alive
         self._transport = transport  # injetável em testes (httpx.MockTransport)
 
     def _client(self, timeout: Optional[float] = None) -> httpx.AsyncClient:
@@ -53,6 +55,8 @@ class OllamaClient:
             # Saída estruturada: o Ollama restringe a geração ao JSON Schema (gramática).
             "format": schema if schema is not None else "json",
         }
+        if self.keep_alive:
+            payload["keep_alive"] = self.keep_alive
         try:
             async with self._client() as client:
                 resp = await client.post(f"{self.base_url}/api/chat", json=payload)

@@ -11,7 +11,10 @@
   - **Isolamento de Canais Dedicados (OBS / Zoom / Meet):** Analisa e descarta automaticamente faixas inativas/mudas (-91 dB). Canais dedicados de microfone são processados isoladamente como 1 locutor garantido, enquanto a faixa compartilhada de desktop é diarizada para os demais participantes, intercalando todas as falas em ordem cronológica contínua.
   - **Grave ao vivo pelo navegador** com microfone integrado e visualização em tempo real das ondas sonoras.
 - **👥 Separação de Interlocutores (Diarização Neural 100% Local e Offline):**
-  - **Motor Neural SpeechBrain (ECAPA-TDNN):** Extração de assinaturas vocais densas de 192 dimensões aceleradas por GPU CUDA, sem requerer token ou cadastro no Hugging Face.
+  - **pyannote community-1 (padrão quando baixado):** Segmentação neural com detecção de fala sobreposta e saída "exclusiva" (um locutor por instante) pensada para casar com o Whisper. Carregado de diretório local, com telemetria desligada.
+  - **Motores de reserva:** SpeechBrain ECAPA-TDNN e motor acústico (MFCC + pitch), escolhidos automaticamente se o anterior não estiver disponível.
+  - **Atribuição por Frase:** O locutor é decidido por frase (voto ponderado pela duração), não palavra a palavra — uma palavra na borda de um turno não parte mais a frase. Interrupções reais (várias palavras, mais de 1 s) continuam separadas.
+  - **Correção Manual:** Mesclar locutores, mover um trecho para outro locutor (ou para um novo) e refazer a separação informando o número de pessoas — a transcrição é reaproveitada e os nomes confirmados são mantidos.
   - **Silero VAD Neural:** Detecção de fala humana profunda que descarta digitação, ar-condicionado e cliques.
   - **Suavização de Micro-Clusters:** Elimina locutores fantasmas causados por tosses ou interjeições rápidas.
   - **Inferência de Nomes com Evidência:** O LLM sugere nomes (auto-apresentação: *"aqui é a Mariana"*; ou chamado pelo nome: *"Carlos, pode falar?"* seguido da resposta do Carlos). As sugestões só são aplicadas após validação determinística (nome presente na transcrição, quem é chamado é quem responde, confiança mínima, nomes únicos). Sugestões fracas aparecem na interface para você confirmar.
@@ -44,6 +47,11 @@
   - Velocidades de reprodução de `1x`, `1.25x` e `1.5x`.
 - **🗄️ Histórico Completo:**
   - Reuniões salvas localmente em banco SQLite para consulta e re-exportação a qualquer momento.
+  - Excluir uma reunião apaga também o áudio, as faixas e os checkpoints dela no disco.
+- **🛟 Robustez:**
+  - Processamentos gravados no banco: recarregar a página reconecta ao andamento; um reinício do servidor marca o job como interrompido, com botão **Tentar novamente**.
+  - **Checkpoints por etapa** (faixas, diarização, transcrição): tentar novamente ou re-diarizar não refaz o que já foi concluído.
+  - Em GPU, diarização e Whisper são liberados da VRAM antes da ata (Ollama), evitando estouro de memória.
 
 ---
 
@@ -65,13 +73,16 @@ meeting-ai-summarize/
 │   ├── database.py              # Repositório SQLite com migrações versionadas
 │   ├── models/schemas.py        # Domínio e DTOs (Pydantic)
 │   ├── prompts/                 # Prompts versionados da ata (+ orientações por tipo de reunião)
+│   ├── scripts/download_models.py  # Download único dos modelos (depois tudo roda offline)
 │   └── services/
 │       ├── pipeline.py          # Orquestração do processamento (não bloqueia o event loop)
-│       ├── jobs.py              # Registro de jobs com expiração e fila (semáforo)
+│       ├── jobs.py              # Jobs em memória + SQLite, log em tempo real e fila (semáforo)
 │       ├── file_store.py        # Upload em streaming e validação de caminhos
 │       ├── audio_service.py     # Conversão 16kHz mono com FFmpeg e amix multifaixa
 │       ├── transcription.py     # Faster-Whisper 100% offline (PT-BR)
-│       ├── diarization.py       # Diarização local (Pyannote → SpeechBrain → acústico)
+│       ├── diarization/         # Motores plugáveis: pyannote → SpeechBrain → acústico (offline)
+│       ├── artifacts.py         # Checkpoints das etapas pesadas (retomar / re-diarizar)
+│       ├── speaker_editing.py   # Mesclar, reatribuir trechos, manter nomes ao re-diarizar
 │       ├── alignment.py         # Fusão fala x orador
 │       ├── speakers.py          # IDs estáveis x nomes de exibição (apresentação)
 │       ├── exporter.py          # Gerador DOCX, Markdown e TXT
@@ -92,6 +103,7 @@ meeting-ai-summarize/
     ├── test_minutes.py          # Ata estruturada, map-reduce, retries, prazos, nomes
     ├── test_api.py              # Segurança de arquivos, renomeação, migração de dados legados
     ├── test_pipeline.py         # Pipeline ponta a ponta, fila e event loop
+    ├── test_alignment.py        # Atribuição de locutor por frase
     ├── test_audio_pipeline.py   # Alinhamento, exportações, diarização local
     └── generate_test_audio.py   # Gerador de áudio sintético WAV
 ```
@@ -183,8 +195,11 @@ Todas as opções do MeetingAI são configuradas centralizadamente via variávei
 | `SPEAKER_NAME_MIN_CONFIDENCE` | `0.75` | `0` a `1` | Confiança mínima para aplicar automaticamente um nome inferido. |
 | `MAX_CONCURRENT_JOBS` | `1` | Inteiro | Processamentos pesados simultâneos (os demais aguardam na fila). |
 | `CORS_ORIGINS` | `["*"]` | Lista JSON | Origens permitidas para chamadas à API. |
-| `ENABLE_PYANNOTE` | `false` | `true`, `false` | Ativa o pipeline Pyannote legado se um `HF_TOKEN` for fornecido. |
-| `HF_TOKEN` | `""` | Token Hugging Face | Token opcional do Hugging Face (desnecessário para o SpeechBrain). |
+| `DIARIZATION_ENGINE` | `auto` | `auto`, `pyannote`, `speechbrain`, `acoustic` | Motor de diarização preferido (os seguintes servem de reserva). |
+| `HF_HUB_OFFLINE` | `1` | `0`, `1` | `1` = modelos só do disco, sem rede. Use `0` apenas no comando de download. |
+| `HF_TOKEN` | `""` | Token Hugging Face | Usado **somente** pelo script de download do pyannote; nunca em processamento. |
+| `OLLAMA_KEEP_ALIVE` | `5m` | Duração | Tempo que o Ollama mantém o modelo carregado após a ata. |
+| `RELEASE_MODELS_AFTER_USE` | automático | `true`, `false` | Libera diarização/Whisper da memória entre etapas (automático: só com CUDA). |
 
 ---
 
@@ -216,15 +231,59 @@ Você pode ajustar `OLLAMA_NUM_CTX` no seu arquivo `.env` de acordo com a sua GP
 
 ---
 
+## 📦 Modelos 100% Offline (download único)
+
+Por padrão o container roda com `HF_HUB_OFFLINE=1`: os modelos são lidos **somente** do disco (`./data/models_cache`) e nenhuma biblioteca acessa a rede. Para baixar os modelos uma única vez:
+
+```bash
+# Whisper + SpeechBrain (públicos)
+docker compose run --rm -e HF_HUB_OFFLINE=0 app python -m backend.scripts.download_models --whisper medium
+
+# + pyannote community-1 (gratuito; aceite os termos em
+#   https://huggingface.co/pyannote/speaker-diarization-community-1 e use um token de leitura)
+docker compose run --rm -e HF_HUB_OFFLINE=0 app python -m backend.scripts.download_models --whisper medium,large-v3 --hf-token hf_xxx
+```
+
+O token é usado só nesse comando e não é gravado. Depois disso, tudo roda offline. Se um modelo escolhido na interface não estiver no disco, o processamento falha com a mensagem de como baixá-lo (nada é baixado em segundo plano). `GET /api/diarization/engines` mostra quais motores de diarização estão disponíveis.
+
+### 🔐 pyannote: por que pede para aceitar termos? Ele é obrigatório?
+
+- **Não é obrigatório.** Sem o pyannote, a aplicação usa automaticamente o **SpeechBrain** (público, sem termos, também 100% offline). O pyannote só melhora a separação de locutores: detecta fala sobreposta, conta melhor as pessoas e entrega um locutor por instante, o que casa melhor com a transcrição do Whisper.
+- **O termo vale só para o download, não para o uso.** Os autores (que também mantêm o serviço comercial pyannoteAI) publicam o modelo como *gated* no Hugging Face: para baixar os arquivos é preciso estar logado e aceitar compartilhar nome/empresa com eles. A licença do modelo é **CC-BY-4.0** (aberta, permite uso comercial, exige apenas atribuição aos autores).
+- **Em processamento é 100% offline:** o pipeline é carregado de `data/models_cache/pyannote-speaker-diarization-community-1`, sem token e sem rede. A telemetria opcional do pyannote 4 fica desligada (`PYANNOTE_METRICS_ENABLED=0` no `docker-compose.yml` e `set_telemetry_metrics(False)` no código), e o container roda com `HF_HUB_OFFLINE=1`.
+
+#### Opção A — pelo script (usa o token apenas no download)
+
+1. Crie uma conta em [huggingface.co](https://huggingface.co) e aceite os termos em [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1).
+2. Gere um token de **leitura** em *Settings → Access Tokens*.
+3. Rode:
+   ```bash
+   docker compose run --rm -e HF_HUB_OFFLINE=0 app python -m backend.scripts.download_models --whisper medium --hf-token hf_xxx
+   ```
+
+#### Opção B — sem colocar token na aplicação
+
+1. Aceite os termos pelo navegador (passo 1 acima).
+2. Em qualquer máquina com internet, clone o repositório oficial (pede o usuário e um token do Hugging Face como senha):
+   ```bash
+   git lfs install
+   git clone https://huggingface.co/pyannote/speaker-diarization-community-1
+   ```
+3. Copie a pasta para `data/models_cache/pyannote-speaker-diarization-community-1` (precisa conter o `config.yaml`).
+4. Reinicie o app (`docker compose restart app`). Com `DIARIZATION_ENGINE=auto`, o pyannote passa a ser usado; o log do processamento mostra o motor escolhido.
+
+> ⚠️ Existem cópias do modelo **sem** o termo publicadas por terceiros no Hugging Face (a licença permite redistribuição). Não recomendamos usá-las: não são oficiais e um arquivo de modelo adulterado pode executar código ao ser carregado. Use sempre o repositório oficial `pyannote/speaker-diarization-community-1`.
+
+---
+
 ## 🎙️ Diarização Neural 100% Local & Offline
 
-O MeetingAI utiliza um pipeline moderno em cascata:
-1. **SpeechBrain ECAPA-TDNN:** Rede neural de ponta com extração de 192 embeddings vocais invariantes a volume e ruído.
-2. **Silero VAD Neural:** Detecção de atividade vocal que ignora respirações, estalos e ruídos ambientes.
-3. **Pós-processamento de Micro-Clusters:** Suaviza fatias curtas espúrias para evitar "locutores fantasmas".
-4. **Isolamento Multi-Faixa:** Em vídeos com múltiplos canais (OBS Studio), o canal de microfone do apresentador é isolado como 1 orador único, e a chamada desktop é diarizada separadamente para os demais participantes.
+Motores plugáveis, escolhidos por `DIARIZATION_ENGINE` (padrão `auto`, na ordem abaixo; se um não estiver disponível ou falhar, o próximo assume):
+1. **pyannote `speaker-diarization-community-1`:** segmentação neural com fala sobreposta, contagem de locutores e saída exclusiva (um locutor por instante). Telemetria desligada (`PYANNOTE_METRICS_ENABLED=0`).
+2. **SpeechBrain ECAPA-TDNN + Silero VAD:** embeddings de 192 dimensões e agrupamento hierárquico.
+3. **Motor acústico:** MFCC + pitch + clustering, sem modelos baixados.
 
-Não é necessário criar conta no Hugging Face nem informar tokens externos para usufruir da separação completa de oradores.
+Depois da diarização, o **alinhamento por frase** decide o locutor de cada frase pelo voto ponderado das palavras. **Isolamento multi-faixa:** em gravações com várias faixas (OBS Studio), cada faixa é diarizada separadamente e as falas são intercaladas.
 
 ---
 
@@ -261,10 +320,17 @@ Quando a aplicação estiver rodando, a documentação Swagger interativa pode s
 | `GET` | `/api/audio/{filename}` | Streaming de áudio para o player |
 | `GET` | `/api/models/ollama` | Lista modelos instalados no Ollama |
 | `GET` | `/api/health` | Diagnóstico geral dos serviços |
+| `GET` | `/api/jobs/active` | Processamento em andamento (para reconectar a interface) |
+| `POST` | `/api/jobs/{id}/retry` | Refaz um processamento que falhou, reaproveitando etapas concluídas |
+| `POST` | `/api/meetings/{id}/rediarize` | Refaz a separação de locutores (ex.: `{"num_speakers": 3}`) reaproveitando a transcrição |
+| `POST` | `/api/meetings/{id}/speakers/merge` | Mescla locutores (`source_ids` → `target_id`) |
+| `POST` | `/api/meetings/{id}/segments/reassign` | Move trechos para outro locutor ou para um novo |
+| `GET` | `/api/diarization/engines` | Motores de diarização disponíveis e motivo dos indisponíveis |
 
 ---
 
 ## 🔒 Privacidade & Segurança
 
 - **100% Local:** Todo o processamento de áudio, transcrição e inferência do LLM é executado estritamente na sua máquina dentro dos containers Docker.
-- **Sem Telemetria:** Nenhuma gravação, voz ou texto de reunião sai da sua rede.
+- **Sem Telemetria:** Nenhuma gravação, voz ou texto de reunião sai da sua rede. Telemetria do Hugging Face e do pyannote desligada; a interface não carrega fontes nem scripts de CDNs externos.
+- **Modo Offline Estrito:** `HF_HUB_OFFLINE=1` por padrão; modelos só do disco local.

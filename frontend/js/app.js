@@ -48,6 +48,25 @@ class MeetingApp {
     this._setupDropzone();
     this._checkHealth();
     this.loadMeetingsHistory();
+    this._resumeActiveJob();
+  }
+
+  /** Reconecta a um processamento em andamento (ex.: página recarregada no meio da transcrição). */
+  async _resumeActiveJob() {
+    try {
+      const resp = await fetch("/api/jobs/active");
+      if (!resp.ok) return;
+      const job = await resp.json();
+      if (!job || !job.job_id) return;
+      this.switchTab("processing");
+      this._resetProgressUI();
+      this._appendLog("Reconectado ao processamento em andamento.", "success");
+      this.activeJobId = job.job_id;
+      this._updateProgressUI(job);
+      this._listenToJobEvents(job.job_id);
+    } catch (e) {
+      console.warn("Não foi possível verificar processamentos em andamento:", e);
+    }
   }
 
   _initElements() {
@@ -214,23 +233,17 @@ class MeetingApp {
 
   _listenToJobEvents(jobId) {
     if (this.eventSource) this.eventSource.close();
+    this.activeJobId = jobId;
+    this._hideJobActions();
 
-    this.eventSource = new EventSource(`/api/jobs/${jobId}/stream`);
-
+    this.eventSource = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/stream`);
     this.eventSource.onmessage = (event) => {
       try {
         const job = JSON.parse(event.data);
         this._updateProgressUI(job);
-
-        if (job.status === "completed") {
+        if (job.status === "completed" || job.status === "failed") {
           this.eventSource.close();
-          this.showToast("🎉 Reunião processada e Ata gerada com sucesso!");
-          this.currentMeeting = job.result;
-          this._renderMeetingData(job.result);
-          setTimeout(() => this.switchTab("minutes"), 600);
-        } else if (job.status === "failed") {
-          this.eventSource.close();
-          alert(`Falha no processamento: ${job.error}`);
+          this._onJobFinished(job);
         }
       } catch (err) {
         console.error("Erro no SSE:", err);
@@ -247,19 +260,13 @@ class MeetingApp {
   async _pollJobStatus(jobId) {
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`/api/jobs/${jobId}`);
+        const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+        if (!res.ok) return;
         const job = await res.json();
         this._updateProgressUI(job);
-
-        if (job.status === "completed") {
+        if (job.status === "completed" || job.status === "failed") {
           clearInterval(interval);
-          this.showToast("🎉 Reunião concluída!");
-          this.currentMeeting = job.result;
-          this._renderMeetingData(job.result);
-          this.switchTab("minutes");
-        } else if (job.status === "failed") {
-          clearInterval(interval);
-          alert(`Falha no processamento: ${job.error}`);
+          this._onJobFinished(job);
         }
       } catch (e) {
         console.error("Polling error:", e);
@@ -267,10 +274,59 @@ class MeetingApp {
     }, 2000);
   }
 
+  async _onJobFinished(job) {
+    if (job.status === "failed") {
+      this._showJobActions(job);
+      this.showToast("Falha no processamento. Veja o log e use \"Tentar novamente\".", 5000);
+      return;
+    }
+    let meeting = job.result;
+    if (!meeting && job.meeting_id) {
+      // Job concluído enquanto a página estava fechada: o resultado vem do banco
+      const resp = await fetch(`/api/meetings/${encodeURIComponent(job.meeting_id)}`);
+      if (resp.ok) meeting = await resp.json();
+    }
+    if (!meeting) return;
+    this.showToast(job.kind === "rediarize" ? "🎉 Separação de locutores refeita e ata atualizada!"
+                                            : "🎉 Reunião processada e Ata gerada com sucesso!");
+    this._renderMeetingData(meeting);
+    setTimeout(() => this.switchTab(job.kind === "rediarize" ? "transcript" : "minutes"), 600);
+  }
+
+  _showJobActions(job) {
+    const box = document.getElementById("job-actions");
+    if (!box) return;
+    box.style.display = "flex";
+    document.getElementById("job-error-text").textContent = job.error || "Erro desconhecido.";
+    const btn = document.getElementById("btn-retry-job");
+    btn.disabled = !job.request;
+    btn.onclick = () => this.retryJob(job.job_id);
+  }
+
+  _hideJobActions() {
+    const box = document.getElementById("job-actions");
+    if (box) box.style.display = "none";
+  }
+
+  /** Refaz um job que falhou; as etapas já concluídas (faixas, diarização, transcrição) são reaproveitadas. */
+  async retryJob(jobId) {
+    try {
+      const resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST" });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || "Não foi possível tentar novamente.");
+      this._resetProgressUI();
+      this._appendLog("Retomando o processamento (etapas concluídas serão reaproveitadas)...", "info");
+      this._listenToJobEvents(data.job_id);
+    } catch (e) {
+      alert(`Erro: ${e.message}`);
+    }
+  }
+
   _resetProgressUI() {
     this.progressFill.style.width = "0%";
     this.currentStepLabel.textContent = "Preparando modelos locais...";
     this.logBox.innerHTML = "";
+    this._hideJobActions();
     this.lastLogSeq = 0;
     this.lastStepIdx = 1;
     this.lastRenderedStep = "";
@@ -435,6 +491,7 @@ class MeetingApp {
 
     audioPlayer.loadAudio(meeting.audio_url, meeting.segments);
     this._renderSpeakerInputs(meeting);
+    this._renderSpeakerTools(meeting);
     this._renderSpeakerSuggestions(meeting);
     this._renderTranscriptFeed(meeting.segments);
   }
@@ -531,15 +588,48 @@ class MeetingApp {
     }
   }
 
-  _renderSpeakerInputs(meeting) {
-    const container = document.getElementById("speakers-inputs-container");
-    container.innerHTML = "";
-
+  /** Locutores presentes na transcrição: Map(speaker_id -> nome de exibição), na ordem em que aparecem. */
+  _speakersOf(meeting) {
     const seen = new Map();
     meeting.segments.forEach((seg) => {
       const id = seg.speaker_id || seg.speaker;
       if (!seen.has(id)) seen.set(id, seg.speaker);
     });
+    return seen;
+  }
+
+  _speakerOptionsHtml(speakers, selectedId = null) {
+    return Array.from(speakers.entries())
+      .map(([id, name]) => {
+        const label = name !== id ? `${name} (${id})` : id;
+        return `<option value="${escapeHtml(id)}" ${id === selectedId ? "selected" : ""}>${escapeHtml(label)}</option>`;
+      })
+      .join("");
+  }
+
+  _renderSpeakerTools(meeting) {
+    const speakers = this._speakersOf(meeting);
+    const src = document.getElementById("merge-source");
+    const dst = document.getElementById("merge-target");
+    if (src && dst) {
+      const ids = Array.from(speakers.keys());
+      src.innerHTML = this._speakerOptionsHtml(speakers, ids[1] || ids[0]);
+      dst.innerHTML = this._speakerOptionsHtml(speakers, ids[0]);
+    }
+    const tools = document.getElementById("speaker-tools");
+    if (tools) tools.style.display = meeting.segments.length ? "flex" : "none";
+    const rediarizeBox = document.getElementById("rediarize-tool");
+    if (rediarizeBox) {
+      rediarizeBox.title = meeting.source ? "" : "Disponível para reuniões processadas a partir desta versão.";
+      rediarizeBox.querySelectorAll("input, button").forEach((el) => (el.disabled = !meeting.source));
+    }
+  }
+
+  _renderSpeakerInputs(meeting) {
+    const container = document.getElementById("speakers-inputs-container");
+    container.innerHTML = "";
+
+    const seen = this._speakersOf(meeting);
 
     seen.forEach((displayName, speakerId) => {
       const chip = document.createElement("div");
@@ -583,6 +673,7 @@ class MeetingApp {
   _renderTranscriptFeed(segments) {
     const feed = document.getElementById("transcript-feed-container");
     feed.innerHTML = "";
+    const speakers = this.currentMeeting ? this._speakersOf(this.currentMeeting) : new Map();
 
     segments.forEach((seg) => {
       const color = this._speakerColor(seg.speaker_id || seg.speaker);
@@ -599,14 +690,87 @@ class MeetingApp {
         <div class="speaker-avatar" style="background-color: ${color};">${escapeHtml(initials)}</div>
         <div class="utterance-body">
           <div class="utterance-header">
-            <span class="speaker-name">${escapeHtml(seg.speaker)}</span>
+            <span class="speaker-name-wrap">
+              <span class="speaker-name">${escapeHtml(seg.speaker)}</span>
+              <select class="speaker-reassign" title="Corrigir o locutor deste trecho" data-seg="${Number(seg.id)}">
+                ${this._speakerOptionsHtml(speakers, seg.speaker_id || seg.speaker)}
+                <option value="__new__">➕ Novo locutor</option>
+              </select>
+            </span>
             <span class="utterance-timestamp">▶ ${audioPlayer.formatTime(seg.start)} - ${audioPlayer.formatTime(seg.end)}</span>
           </div>
           <div class="utterance-text">${escapeHtml(seg.text)}</div>
         </div>
       `;
+      const select = bubble.querySelector(".speaker-reassign");
+      select.onclick = (e) => e.stopPropagation();
+      select.onchange = (e) => {
+        e.stopPropagation();
+        const value = select.value;
+        this.reassignSegments([seg.id], value === "__new__" ? null : value);
+      };
       feed.appendChild(bubble);
     });
+  }
+
+  async _meetingAction(url, body, okMessage) {
+    if (!this.currentMeeting) return null;
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Operação não concluída.");
+      if (okMessage) this.showToast(okMessage);
+      return data;
+    } catch (e) {
+      alert(`Erro: ${e.message}`);
+      return null;
+    }
+  }
+
+  /** Move trechos para outro locutor (ou para um locutor novo, quando speakerId é null). */
+  async reassignSegments(segmentIds, speakerId) {
+    const id = encodeURIComponent(this.currentMeeting.id);
+    const updated = await this._meetingAction(`/api/meetings/${id}/segments/reassign`,
+      { segment_ids: segmentIds, speaker_id: speakerId }, "Locutor do trecho atualizado.");
+    if (updated) this._renderMeetingData(updated);
+    else this._renderTranscriptFeed(this.currentMeeting.segments);
+  }
+
+  /** Une dois locutores que a diarização separou indevidamente. */
+  async mergeSpeakers() {
+    const source = document.getElementById("merge-source").value;
+    const target = document.getElementById("merge-target").value;
+    if (!source || !target || source === target) {
+      this.showToast("Escolha dois locutores diferentes para mesclar.");
+      return;
+    }
+    if (!confirm(`Mesclar ${source} em ${target}? Todas as falas de ${source} passarão para ${target}.`)) return;
+    const id = encodeURIComponent(this.currentMeeting.id);
+    const updated = await this._meetingAction(`/api/meetings/${id}/speakers/merge`,
+      { source_ids: [source], target_id: target }, "Locutores mesclados (transcrição e ata atualizadas).");
+    if (updated) this._renderMeetingData(updated);
+  }
+
+  /** Refaz a separação de locutores reaproveitando a transcrição (só a diarização e a ata rodam de novo). */
+  async rediarize() {
+    const raw = document.getElementById("rediarize-count").value;
+    const count = raw ? parseInt(raw, 10) : null;
+    const msg = count ? `Refazer a separação considerando ${count} pessoa(s)?` : "Refazer a separação com detecção automática?";
+    if (!confirm(`${msg}\nA ata será regerada; nomes já confirmados são mantidos quando a voz corresponder.`)) return;
+    const id = encodeURIComponent(this.currentMeeting.id);
+    const data = await this._meetingAction(`/api/meetings/${id}/rediarize`, {
+      num_speakers: count,
+      ollama_model: document.getElementById("select-ollama-model").value || null,
+    });
+    if (!data) return;
+    this.switchTab("processing");
+    this._resetProgressUI();
+    this._appendLog("Refazendo a separação de locutores (a transcrição será reaproveitada)...");
+    this._listenToJobEvents(data.job_id);
   }
 
   filterTranscript(query) {
@@ -785,11 +949,11 @@ class MeetingApp {
   }
 
   async deleteMeeting(meetingId) {
-    if (!confirm("Tem certeza que deseja excluir esta reunião?")) return;
+    if (!confirm("Excluir esta reunião? O áudio e a transcrição também serão apagados do disco.")) return;
     try {
       await fetch(`/api/meetings/${encodeURIComponent(meetingId)}`, { method: "DELETE" });
       this.loadMeetingsHistory();
-      this.showToast("Reunião removida com sucesso.");
+      this.showToast("Reunião e arquivos de áudio removidos.");
     } catch (e) {
       alert("Erro ao excluir reunião.");
     }

@@ -11,6 +11,7 @@ ALLOWED_EXTENSIONS = {
     ".mp4", ".webm", ".mkv", ".mov", ".avi",
 }
 FILE_ID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[a-z0-9]{2,5}$")
+UUID_STEM_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SAFE_NAME_PATTERN = re.compile(r"^[\w.-]{1,200}$")
 CHUNK_SIZE = 1024 * 1024
 
@@ -74,3 +75,23 @@ class FileStore:
             if _inside(base, path) and path.is_file():
                 return path
         raise FileNotFoundError(filename)
+
+    def delete_source_files(self, stem: str) -> int:
+        """
+        Remove o upload original e os WAVs derivados (mestre e faixas) de uma reunião.
+        Só aceita o identificador UUID gerado pelo próprio sistema.
+        """
+        stem = Path(stem).stem
+        if not UUID_STEM_PATTERN.fullmatch(stem):
+            raise InvalidFileError("Identificador de arquivo inválido.")
+        removed = 0
+        candidates = [
+            *self.upload_dir.glob(f"{stem}.*"),
+            *self.processed_dir.glob(f"{stem}_16k.wav"),
+            *self.processed_dir.glob(f"{stem}_track_*_16k.wav"),
+        ]
+        for path in candidates:
+            if path.is_file() and (_inside(self.upload_dir, path) or _inside(self.processed_dir, path)):
+                path.unlink(missing_ok=True)
+                removed += 1
+        return removed

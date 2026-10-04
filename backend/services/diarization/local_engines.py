@@ -10,29 +10,55 @@ _SPEECHBRAIN_CLASSIFIER = None
 
 
 def get_speechbrain_classifier():
-    """Carrega e mantém o modelo SpeechBrain ECAPA-TDNN em cache de memória."""
+    """
+    Carrega o SpeechBrain ECAPA-TDNN do diretório local. Só busca no Hugging Face se o modelo
+    ainda não existir no disco E o modo offline (HF_HUB_OFFLINE=1) não estiver ativo.
+    """
     global _SPEECHBRAIN_CLASSIFIER
     if _SPEECHBRAIN_CLASSIFIER is None:
+        import os
         import torch
         from speechbrain.inference.speaker import EncoderClassifier
-        savedir = str(settings.MODELS_CACHE_DIR / "speechbrain_ecapa")
+        savedir = settings.speechbrain_model_dir
+        local_ready = (savedir / "hyperparams.yaml").exists() and (savedir / "embedding_model.ckpt").exists()
+        if not local_ready and os.environ.get("HF_HUB_OFFLINE") == "1":
+            raise RuntimeError(f"Modelo SpeechBrain não encontrado em {savedir} (modo offline). "
+                               "Rode o script de download de modelos.")
+        source = str(savedir) if local_ready else "speechbrain/spkrec-ecapa-voxceleb"
         device = "cuda:0" if torch.cuda.is_available() and settings.WHISPER_DEVICE == "cuda" else "cpu"
-        logger.info(f"Carregando classificador SpeechBrain ECAPA-TDNN no dispositivo: {device}...")
+        logger.info(f"Carregando SpeechBrain ECAPA-TDNN ({'local' if local_ready else 'download'}) em {device}...")
         _SPEECHBRAIN_CLASSIFIER = EncoderClassifier.from_hparams(
-            source="speechbrain/spkrec-ecapa-voxceleb",
-            savedir=savedir,
+            source=source,
+            savedir=str(savedir),
             run_opts={"device": device}
         )
         logger.info("Classificador SpeechBrain carregado com sucesso!")
     return _SPEECHBRAIN_CLASSIFIER
 
 
-class DiarizationService:
+def release_speechbrain_classifier() -> None:
+    """Libera o modelo da memória (VRAM) — usado antes do Whisper/LLM em GPUs menores."""
+    global _SPEECHBRAIN_CLASSIFIER
+    if _SPEECHBRAIN_CLASSIFIER is not None:
+        _SPEECHBRAIN_CLASSIFIER = None
+        _empty_cuda_cache()
+
+
+def _empty_cuda_cache() -> None:
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+class LocalDiarizationEngines:
     """
-    Motor de Diarização (Separação de Oradores) 100% Local e Offline.
-    
-    Funciona inteiramente na máquina local sem necessidade de conexão com a internet,
-    tokens de API ou contas externas (HuggingFace).
+    Motores locais de diarização usados como alternativa ao pyannote:
+    SpeechBrain ECAPA-TDNN (neural) e acústico (MFCC + pitch). Sem rede em tempo de processamento.
     
     Etapas do Pipeline Local:
     1. VAD Adaptativo: Detecção inteligente de trechos de fala com fusão de pausas e sub-janelamento.
@@ -41,47 +67,6 @@ class DiarizationService:
        automática do número ótimo de oradores via Silhouette Score ou parâmetros manuais.
     4. Suavização Temporal: Consolidação de fatias e eliminação de ruídos transitórios.
     """
-
-    def __init__(self, hf_token: Optional[str] = None):
-        self.hf_token = hf_token or settings.HF_TOKEN
-
-    def diarize(
-        self,
-        audio_path: Path,
-        min_speakers: Optional[int] = None,
-        max_speakers: Optional[int] = None,
-        log_callback: Optional[Callable[..., None]] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Executa separação de oradores (Diarização) 100% local e offline.
-        `log_callback(mensagem, nivel)` recebe o andamento para o log em tempo real.
-        """
-        def emit(message: str, level: str = "info") -> None:
-            if log_callback:
-                log_callback(message, level)
-
-        # 1. Se o usuário configurar explicitamente Pyannote e houver token válido, tenta pyannote
-        if settings.ENABLE_PYANNOTE and self.hf_token:
-            try:
-                logger.info("Tentando diarização com Pyannote...")
-                emit("Executando diarização com Pyannote...")
-                return self._diarize_pyannote(audio_path, min_speakers, max_speakers)
-            except Exception as e:
-                logger.warning(f"Pyannote indisponível ({e}). Tentando motor SpeechBrain...")
-                emit(f"Pyannote indisponível ({e}). Usando SpeechBrain...", "warning")
-
-        # 2. Diarização Neural SpeechBrain (ECAPA-TDNN) 100% Local (alta precisão)
-        try:
-            return self._diarize_speechbrain(audio_path, min_speakers, max_speakers, log_callback=log_callback)
-        except Exception as e:
-            logger.warning(f"SpeechBrain indisponível ({e}). Executando motor acústico Librosa...", exc_info=True)
-            emit(f"SpeechBrain indisponível ({e}). Usando motor acústico (Librosa)...", "warning")
-
-        # 3. Fallback acústico (MFCC + pitch + clustering). Antes desta correção o método
-        #    caía no final sem retorno e devolvia None, jogando toda a fala em "Locutor 1".
-        result = self._diarize_local(audio_path, min_speakers, max_speakers)
-        emit(f"Diarização acústica finalizada: {len({r['speaker'] for r in result})} locutor(es).", "success")
-        return result
 
     def _diarize_speechbrain(
         self,
@@ -631,51 +616,3 @@ class DiarizationService:
                 smoothed.append(dict(seg))
 
         return smoothed
-
-    def _diarize_pyannote(
-        self,
-        audio_path: Path,
-        min_speakers: Optional[int] = None,
-        max_speakers: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
-        """Método opcional alternativo para quem tiver pipeline Pyannote configurado."""
-        import torch
-        from pyannote.audio import Pipeline
-
-        device = torch.device("cuda" if torch.cuda.is_available() and settings.WHISPER_DEVICE == "cuda" else "cpu")
-        try:
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                token=self.hf_token
-            )
-        except (TypeError, ValueError):
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                use_auth_token=self.hf_token
-            )
-        pipeline.to(device)
-
-        params = {}
-        if min_speakers:
-            params["min_speakers"] = min_speakers
-        if max_speakers:
-            params["max_speakers"] = max_speakers
-
-        diarization = pipeline(str(audio_path), **params)
-
-        speaker_map = {}
-        speaker_counter = 1
-        results = []
-
-        for turn, _, speaker in diarization.itertracks(yield_label=True):
-            if speaker not in speaker_map:
-                speaker_map[speaker] = f"Locutor {speaker_counter}"
-                speaker_counter += 1
-
-            results.append({
-                "start": round(turn.start, 2),
-                "end": round(turn.end, 2),
-                "speaker": speaker_map[speaker]
-            })
-
-        return results

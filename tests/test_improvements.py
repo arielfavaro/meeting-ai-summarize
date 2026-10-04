@@ -7,7 +7,8 @@ from unittest import mock
 
 import numpy as np
 
-from backend.services.diarization import DiarizationService
+from backend.services.diarization import DiarizationService, engine_chain
+from backend.services.diarization.local_engines import LocalDiarizationEngines
 from backend.services.alignment import align_transcription_with_diarization, merge_multitrack_segments
 from backend.services.minutes.generator import MinutesConfig, MinutesGenerator
 from backend.services.transcription import build_initial_prompt
@@ -18,7 +19,7 @@ HAS_FASTER_WHISPER = importlib.util.find_spec("faster_whisper") is not None and 
 @unittest.skipUnless(HAS_FASTER_WHISPER, "faster-whisper/librosa não instalados")
 def test_silero_vad():
     print("=== TEST 1: Silero VAD speech detection ===")
-    diarizer = DiarizationService()
+    diarizer = LocalDiarizationEngines()
     # Test on synthetic audio
     dummy = np.random.randn(48000).astype(np.float32)
     segments = diarizer._detect_speech_segments(dummy, sr=16000)
@@ -89,16 +90,43 @@ def test_adaptive_num_ctx():
     assert gen._prompt_tokens(short) < 100 < gen._prompt_tokens(long)
 
 
+class _FakeEngine:
+    def __init__(self, name, reason=None, error=None, turns=None):
+        self.name, self.label = name, name
+        self.reason, self.error, self.turns = reason, error, turns
+        self.calls = 0
+
+    def unavailable_reason(self):
+        return self.reason
+
+    def diarize(self, audio_path, min_speakers, max_speakers, log):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return self.turns
+
+    def release(self):
+        pass
+
+
 def test_diarization_falls_back_to_local_engine():
-    """Antes, uma falha do SpeechBrain fazia diarize() retornar None (tudo virava 'Locutor 1')."""
-    print("=== TEST 5: Diarization fallback chain ===")
-    diarizer = DiarizationService()
+    """Cadeia de motores: indisponível → pula; erro → próximo; nunca devolve None."""
+    print("=== TEST 5: Diarization engine chain ===")
     expected = [{"start": 0.0, "end": 1.0, "speaker": "Locutor 1"}, {"start": 1.0, "end": 2.0, "speaker": "Locutor 2"}]
-    with mock.patch.object(diarizer, "_diarize_speechbrain", side_effect=RuntimeError("sem speechbrain")), \
-         mock.patch.object(diarizer, "_diarize_local", return_value=expected) as local:
-        result = diarizer.diarize(Path("qualquer.wav"))
+    engines = {
+        "pyannote": _FakeEngine("pyannote", reason="modelo não baixado"),
+        "speechbrain": _FakeEngine("speechbrain", error=RuntimeError("sem speechbrain")),
+        "acoustic": _FakeEngine("acoustic", turns=expected),
+    }
+    logs = []
+    service = DiarizationService(engine="auto", engines=engines)
+    result = service.diarize(Path("qualquer.wav"), log_callback=lambda m, lvl="info": logs.append((lvl, m)))
     assert result == expected
-    local.assert_called_once()
+    assert engines["pyannote"].calls == 0 and engines["speechbrain"].calls == 1
+    assert service.last_engine == "acoustic"
+    assert any(lvl == "warning" and "sem speechbrain" in m for lvl, m in logs)
+    assert engine_chain("speechbrain") == ["speechbrain", "acoustic"]
+    assert engine_chain("inexistente") == ["pyannote", "speechbrain", "acoustic"]
 
 
 def test_whisper_initial_prompt_includes_context_terms():

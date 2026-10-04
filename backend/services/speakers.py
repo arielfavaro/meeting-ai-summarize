@@ -52,21 +52,8 @@ def sync_display_names(meeting: MeetingDetail) -> MeetingDetail:
 
 
 def _resolve_minutes(summary: MeetingMinutes, speaker_map: Dict[str, str], participants: List[str]) -> MeetingMinutes:
-    r = lambda t: resolve_labels(t, speaker_map) if isinstance(t, str) else t  # noqa: E731
-    s = summary.model_copy(deep=True)
-    s.title = r(s.title)
-    s.executive_summary = r(s.executive_summary)
+    s = _map_minutes_text(summary, speaker_map, map_suggestions=False)
     s.participants = participants
-    for o in s.objectives:
-        o.description, o.notes = r(o.description), r(o.notes)
-    for t in s.main_topics:
-        t.title, t.discussion, t.conclusions = r(t.title), r(t.discussion), r(t.conclusions)
-    for d in s.decisions:
-        d.description = r(d.description)
-    for p in [*s.open_points, *s.risks]:
-        p.description = r(p.description)
-    for a in s.action_items:
-        a.task, a.owner = r(a.task), r(a.owner)
     return s
 
 
@@ -89,3 +76,33 @@ def present_meeting(meeting: MeetingDetail) -> MeetingDetail:
 
 def unique_display_names(meeting: MeetingDetail) -> Iterable[str]:
     return [meeting.display_name(sid) for sid in meeting.speaker_ids()]
+
+
+def relabel_minutes(summary: MeetingMinutes, mapping: Dict[str, str]) -> MeetingMinutes:
+    """Troca rótulos estáveis na ata (ex.: ao mesclar "Locutor 3" em "Locutor 1")."""
+    if not summary or not mapping:
+        return summary
+    s = _map_minutes_text(summary, mapping, map_suggestions=True)
+    s.participants = list(dict.fromkeys(mapping.get(p, p) for p in s.participants))
+    return s
+
+
+def _map_minutes_text(summary: MeetingMinutes, mapping: Dict[str, str], *, map_suggestions: bool) -> MeetingMinutes:
+    """Aplica o mapeamento de rótulos em todos os textos da ata (cópia)."""
+    r = lambda t: resolve_labels(t, mapping) if isinstance(t, str) else t  # noqa: E731
+    s = summary.model_copy(deep=True)
+    s.title, s.executive_summary = r(s.title), r(s.executive_summary)
+    for o in s.objectives:
+        o.description, o.notes = r(o.description), r(o.notes)
+    for t in s.main_topics:
+        t.title, t.discussion, t.conclusions = r(t.title), r(t.discussion), r(t.conclusions)
+    for d in s.decisions:
+        d.description = r(d.description)
+    for p in [*s.open_points, *s.risks]:
+        p.description = r(p.description)
+    for a in s.action_items:
+        a.task, a.owner = r(a.task), r(a.owner)
+    if map_suggestions:
+        for sug in s.speaker_suggestions:
+            sug.speaker_id = mapping.get(sug.speaker_id, sug.speaker_id)
+    return s

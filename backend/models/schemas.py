@@ -179,6 +179,17 @@ class ProcessOptions(BaseModel):
 SpeakerNameSource = Literal["default", "llm", "user"]
 
 
+class MeetingSource(BaseModel):
+    """De onde a reunião veio — permite re-diarizar/regerar reaproveitando as etapas salvas."""
+    file_id: str
+    tracks: List[int] = Field(default_factory=lambda: [0])
+    whisper_model: str = "medium"
+    language: str = "pt"
+    min_speakers: Optional[int] = None
+    max_speakers: Optional[int] = None
+    diarization_engine: Optional[str] = None  # motor efetivamente usado
+
+
 class MeetingDetail(BaseModel):
     id: str
     title: str
@@ -191,6 +202,7 @@ class MeetingDetail(BaseModel):
     speaker_map: Dict[str, str] = Field(default_factory=dict)  # speaker_id -> nome de exibição
     speaker_name_sources: Dict[str, SpeakerNameSource] = Field(default_factory=dict)
     context: MeetingContext = Field(default_factory=MeetingContext)
+    source: Optional[MeetingSource] = None
 
     def speaker_ids(self) -> List[str]:
         seen: Dict[str, None] = {}
@@ -227,15 +239,21 @@ class JobLogEntry(BaseModel):
     message: str
 
 
+JobKind = Literal["process", "rediarize"]
+
+
 class JobStatus(BaseModel):
     job_id: str
+    kind: JobKind = "process"
     meeting_id: Optional[str] = None
     status: JobState
     progress: int = 0  # 0 a 100
     current_step: str = ""
     logs: List[JobLogEntry] = Field(default_factory=list)  # últimas linhas do log em tempo real
     error: Optional[str] = None
-    result: Optional[dict] = None  # visão apresentada (nomes resolvidos)
+    result: Optional[dict] = None  # visão apresentada (nomes resolvidos); não é persistida
+    request: Optional[dict] = None  # parâmetros para "tentar novamente"
+    created_at: float = 0.0
     updated_at: float = 0.0
 
 
@@ -243,6 +261,24 @@ class UpdateSpeakersRequest(BaseModel):
     speaker_map: Dict[str, str]  # speaker_id -> novo nome
     regenerate_summary: bool = False
     ollama_model: Optional[str] = None
+
+
+class RediarizeRequest(BaseModel):
+    num_speakers: Optional[int] = Field(default=None, ge=1, le=20)
+    min_speakers: Optional[int] = Field(default=None, ge=1, le=20)
+    max_speakers: Optional[int] = Field(default=None, ge=1, le=20)
+    engine: Optional[str] = None  # "auto" | "pyannote" | "speechbrain" | "acoustic"
+    ollama_model: Optional[str] = None
+
+
+class MergeSpeakersRequest(BaseModel):
+    source_ids: List[str] = Field(min_length=1)
+    target_id: str
+
+
+class ReassignSegmentsRequest(BaseModel):
+    segment_ids: List[int] = Field(min_length=1)
+    speaker_id: Optional[str] = None  # None = cria um novo locutor
 
 
 class RegenerateSummaryRequest(BaseModel):

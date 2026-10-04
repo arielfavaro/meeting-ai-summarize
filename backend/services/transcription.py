@@ -78,7 +78,14 @@ class TranscriptionService:
             except Exception:
                 pass
 
-        # 2. Se o modelo nunca foi baixado para o disco, realiza o download inicial único
+        # 2. Modo offline estrito: nada de rede em processamento
+        import os
+        if os.environ.get("HF_HUB_OFFLINE") == "1":
+            raise RuntimeError(
+                f"Modelo Whisper '{model_size}' não encontrado em {settings.MODELS_CACHE_DIR} (modo offline). "
+                f"Baixe-o uma vez com: python -m backend.scripts.download_models --whisper {model_size}")
+
+        # 3. Se o modelo nunca foi baixado para o disco, realiza o download inicial único
         logger.info(f"📥 Modelo '{model_size}' não encontrado no cache local. Baixando uma única vez para {settings.MODELS_CACHE_DIR}...")
         try:
             model = _try_load(device, compute_type, local_only=False)
@@ -90,6 +97,22 @@ class TranscriptionService:
                 logger.warning(f"Falha na GPU ({e_down}). Tentando download para execução em CPU...")
                 return cls.get_model(model_size=model_size, device="cpu", compute_type="int8")
             raise e_down
+
+    @classmethod
+    def release(cls) -> None:
+        """Descarrega os modelos Whisper da memória (libera VRAM antes do LLM)."""
+        if not cls._models:
+            return
+        cls._models.clear()
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info("Modelos Whisper liberados da memória.")
 
     @classmethod
     def transcribe(

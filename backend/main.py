@@ -25,11 +25,15 @@ from pydantic import ValidationError
 from backend.config import settings
 from backend.database import MeetingRepository
 from backend.dependencies import (
-    get_file_store, get_jobs, get_llm_client, get_minutes_generator, get_pipeline, get_repo,
+    get_artifacts, get_file_store, get_jobs, get_llm_client, get_minutes_generator, get_pipeline, get_repo,
 )
+from backend.services.artifacts import ArtifactStore
+from backend.services.diarization import DiarizationService
 from backend.models.schemas import (
-    JobStatus, MeetingContext, MeetingDetail, ProcessOptions, RegenerateSummaryRequest, UpdateSpeakersRequest,
+    JobStatus, MeetingContext, MeetingDetail, MergeSpeakersRequest, ProcessOptions, ReassignSegmentsRequest,
+    RediarizeRequest, RegenerateSummaryRequest, UpdateSpeakersRequest,
 )
+from backend.services.speaker_editing import SpeakerEditError, merge_speakers, reassign_segments
 from backend.services.audio_service import AudioService
 from backend.services.exporter import ExporterService
 from backend.services.file_store import FileStore, FileTooLargeError, InvalidFileError
@@ -47,6 +51,13 @@ logger = logging.getLogger("meeting_ai")
 async def lifespan(_: FastAPI):
     settings.ensure_dirs()
     get_repo()  # aplica migrações do banco na subida
+    interrupted = get_jobs().recover_interrupted()
+    if interrupted:
+        logger.warning("%d job(s) interrompido(s) pelo reinício marcado(s) como falha (podem ser retomados).", interrupted)
+    try:
+        get_jobs().store.purge_older_than(7 * 24 * 3600)
+    except Exception:
+        logger.debug("Falha ao limpar jobs antigos", exc_info=True)
     yield
 
 
@@ -161,9 +172,42 @@ async def start_processing(
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=json.loads(e.json()))
 
-    job = jobs.create()
+    request = {"type": "process", "file_id": file_id, "title": title,
+               "options": options.model_dump(exclude={"hf_token"})}  # token nunca é gravado
+    job = jobs.create(kind="process", request=request)
     background_tasks.add_task(pipeline.run, job.job_id, file_id, title, options)
     return {"job_id": job.job_id, "status": job.status}
+
+
+@app.get("/api/jobs/active")
+async def get_active_job(jobs: JobRegistry = Depends(get_jobs)):
+    """Job em andamento (a interface usa para reconectar após recarregar a página)."""
+    job = jobs.active()
+    return job.model_dump(exclude={"result"}) if job else None
+
+
+@app.post("/api/jobs/{job_id}/retry")
+async def retry_job(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    jobs: JobRegistry = Depends(get_jobs),
+    pipeline: MeetingPipeline = Depends(get_pipeline),
+):
+    """Refaz um job que falhou, reaproveitando as etapas já concluídas (checkpoints)."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+    if job.status != "failed" or not job.request:
+        raise HTTPException(status_code=409, detail="Só é possível tentar novamente uma tarefa que falhou.")
+    req = job.request
+    new_job = jobs.create(kind=job.kind, request=req)
+    if req.get("type") == "rediarize":
+        background_tasks.add_task(pipeline.run_rediarize, new_job.job_id, req["meeting_id"],
+                                  RediarizeRequest(**req["request"]))
+    else:
+        background_tasks.add_task(pipeline.run, new_job.job_id, req["file_id"], req.get("title") or "Reunião",
+                                  ProcessOptions(**req["options"]))
+    return {"job_id": new_job.job_id, "status": new_job.status}
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobStatus)
@@ -216,10 +260,69 @@ async def get_meeting(meeting_id: str, repo: MeetingRepository = Depends(get_rep
 
 
 @app.delete("/api/meetings/{meeting_id}")
-async def delete_meeting(meeting_id: str, repo: MeetingRepository = Depends(get_repo)):
-    if not repo.delete(meeting_id):
-        raise HTTPException(status_code=404, detail="Reunião não encontrada.")
-    return {"deleted": True, "id": meeting_id}
+async def delete_meeting(
+    meeting_id: str,
+    repo: MeetingRepository = Depends(get_repo),
+    files: FileStore = Depends(get_file_store),
+    artifacts: ArtifactStore = Depends(get_artifacts),
+):
+    """Remove a reunião do banco E os arquivos de áudio/checkpoints dela no disco."""
+    meeting = _load_meeting(repo, meeting_id)
+    repo.delete(meeting_id)
+    stem = Path(meeting.source.file_id).stem if meeting.source else meeting.audio_filename.replace("_16k.wav", "")
+    removed = 0
+    try:
+        removed = files.delete_source_files(stem)
+        artifacts.delete_source(stem)
+    except (InvalidFileError, ValueError):
+        logger.warning("Arquivos da reunião %s não removidos (identificador fora do padrão).", meeting_id)
+    return {"deleted": True, "id": meeting_id, "files_removed": removed}
+
+
+@app.post("/api/meetings/{meeting_id}/rediarize")
+async def rediarize_meeting(
+    meeting_id: str,
+    req: RediarizeRequest,
+    background_tasks: BackgroundTasks,
+    repo: MeetingRepository = Depends(get_repo),
+    jobs: JobRegistry = Depends(get_jobs),
+    pipeline: MeetingPipeline = Depends(get_pipeline),
+):
+    """Refaz a separação de locutores (ex.: informando o número de pessoas) reaproveitando a transcrição."""
+    meeting = _load_meeting(repo, meeting_id)
+    if not meeting.source:
+        raise HTTPException(status_code=409, detail="Reunião processada antes do suporte a re-diarização. "
+                                                    "Envie o áudio novamente para usar este recurso.")
+    job = jobs.create(kind="rediarize", request={"type": "rediarize", "meeting_id": meeting_id,
+                                                 "request": req.model_dump()})
+    background_tasks.add_task(pipeline.run_rediarize, job.job_id, meeting_id, req)
+    return {"job_id": job.job_id, "status": job.status}
+
+
+@app.post("/api/meetings/{meeting_id}/speakers/merge")
+async def merge_meeting_speakers(meeting_id: str, req: MergeSpeakersRequest,
+                                 repo: MeetingRepository = Depends(get_repo)):
+    """Une locutores que a diarização separou indevidamente (a ata é atualizada sem chamar o LLM)."""
+    meeting = _load_meeting(repo, meeting_id)
+    try:
+        merge_speakers(meeting, req.source_ids, req.target_id)
+    except SpeakerEditError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    repo.save(meeting)
+    return present_meeting(meeting)
+
+
+@app.post("/api/meetings/{meeting_id}/segments/reassign")
+async def reassign_meeting_segments(meeting_id: str, req: ReassignSegmentsRequest,
+                                    repo: MeetingRepository = Depends(get_repo)):
+    """Move trechos para outro locutor; sem `speaker_id`, cria um locutor novo (dividir)."""
+    meeting = _load_meeting(repo, meeting_id)
+    try:
+        reassign_segments(meeting, req.segment_ids, req.speaker_id)
+    except SpeakerEditError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    repo.save(meeting)
+    return present_meeting(meeting)
 
 
 @app.put("/api/meetings/{meeting_id}/speakers")
@@ -377,11 +480,21 @@ async def health_check(llm: OllamaClient = Depends(get_llm_client)):
     return {
         "status": "online",
         "version": settings.APP_VERSION,
+        "offline_mode": os.environ.get("HF_HUB_OFFLINE") == "1",
         "whisper_device": settings.WHISPER_DEVICE,
         "ollama_connected": len(ollama_models) > 0,
         "ollama_url": settings.OLLAMA_BASE_URL,
         "ollama_models_count": len(ollama_models),
     }
+
+
+@app.get("/api/diarization/engines")
+async def diarization_engines():
+    """Motores de diarização locais e por que algum estiver indisponível (ex.: modelo não baixado)."""
+    service = DiarizationService()
+    status = await asyncio.to_thread(service.status)
+    return {"configured": service.preferred,
+            "engines": [{"name": name, "available": reason is None, "reason": reason} for name, reason in status.items()]}
 
 
 # Frontend estático

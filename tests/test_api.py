@@ -10,7 +10,9 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from backend.database import MeetingRepository
-from backend.dependencies import get_file_store, get_minutes_generator, get_repo
+from backend.dependencies import get_artifacts, get_file_store, get_jobs, get_minutes_generator, get_pipeline, get_repo
+from backend.services.artifacts import ArtifactStore
+from backend.services.jobs import JobRegistry
 from backend.main import app
 from backend.models.schemas import MeetingDetail, MeetingMinutes, ActionItem, Decision
 from backend.services.file_store import FileStore
@@ -48,6 +50,10 @@ class APITestCase(unittest.TestCase):
         app.dependency_overrides[get_file_store] = lambda: self.files
         app.dependency_overrides[get_minutes_generator] = lambda: MinutesGenerator(
             self.llm, MinutesConfig(default_model="fake"))
+        self.artifacts = ArtifactStore(self.tmp / "processed" / "artifacts")
+        self.jobs = JobRegistry()
+        app.dependency_overrides[get_artifacts] = lambda: self.artifacts
+        app.dependency_overrides[get_jobs] = lambda: self.jobs
         self.client = TestClient(app)
 
     def tearDown(self):
@@ -125,6 +131,108 @@ class TestSpeakers(APITestCase):
         self.repo.save(build_meeting())
         r = self.client.put("/api/meetings/m1/speakers", json={"speaker_map": {"Locutor 9": "X"}})
         self.assertEqual(r.status_code, 400)
+
+
+UUID = "123e4567-e89b-42d3-a456-426614174000"
+
+
+class TestSpeakerEditing(APITestCase):
+    def test_merge_speakers_updates_transcript_and_minutes(self):
+        self.repo.save(build_meeting())
+        self.client.put("/api/meetings/m1/speakers", json={"speaker_map": {"Locutor 3": "Mariana"}})
+        r = self.client.post("/api/meetings/m1/speakers/merge",
+                             json={"source_ids": ["Locutor 3"], "target_id": "Locutor 2"})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual({s["speaker_id"] for s in body["segments"]}, {"Locutor 1", "Locutor 2"})
+        # O destino sem nome herda o nome confirmado da origem; a ata troca o rótulo
+        self.assertEqual(body["summary"]["action_items"][0]["owner"], "Mariana")
+        stored = self.repo.get("m1")
+        self.assertNotIn("Locutor 3", stored.speaker_map)
+        self.assertEqual(stored.summary.action_items[0].owner, "Locutor 2")
+        self.assertEqual(self.llm.calls, [])
+
+    def test_merge_rejects_unknown_speaker(self):
+        self.repo.save(build_meeting())
+        r = self.client.post("/api/meetings/m1/speakers/merge", json={"source_ids": ["Locutor 9"], "target_id": "Locutor 1"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_reassign_segments_to_existing_and_new_speaker(self):
+        self.repo.save(build_meeting())
+        r = self.client.post("/api/meetings/m1/segments/reassign", json={"segment_ids": [5], "speaker_id": "Locutor 3"})
+        self.assertEqual(next(s for s in r.json()["segments"] if s["id"] == 5)["speaker_id"], "Locutor 3")
+
+        r = self.client.post("/api/meetings/m1/segments/reassign", json={"segment_ids": [2, 5]})
+        segs = {s["id"]: s["speaker_id"] for s in r.json()["segments"]}
+        self.assertEqual(segs[2], "Locutor 4")  # novo locutor (dividir)
+        self.assertEqual(segs[5], "Locutor 4")
+
+        r = self.client.post("/api/meetings/m1/segments/reassign", json={"segment_ids": [999]})
+        self.assertEqual(r.status_code, 400)
+
+
+class TestRobustness(APITestCase):
+    def test_delete_meeting_removes_audio_and_checkpoints(self):
+        meeting = build_meeting()
+        meeting.audio_filename = f"{UUID}_16k.wav"
+        from backend.models.schemas import MeetingSource
+        meeting.source = MeetingSource(file_id=f"{UUID}.mp4", tracks=[0, 1])
+        self.repo.save(meeting)
+        uploads, processed = self.tmp / "uploads", self.tmp / "processed"
+        for path in [uploads / f"{UUID}.mp4", processed / f"{UUID}_16k.wav", processed / f"{UUID}_track_1_16k.wav",
+                     uploads / "outro-arquivo.wav"]:
+            path.write_bytes(b"x")
+        self.artifacts.save(f"{UUID}.mp4", "transcription", {"track": 0}, [])
+
+        r = self.client.delete("/api/meetings/m1")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["files_removed"], 3)
+        self.assertEqual([p.name for p in uploads.iterdir()], ["outro-arquivo.wav"])
+        self.assertEqual(list(processed.glob("*.wav")), [])
+        self.assertIsNone(self.artifacts.load(f"{UUID}.mp4", "transcription", {"track": 0}))
+
+    def test_rediarize_legacy_meeting_returns_409(self):
+        self.repo.save(build_meeting())
+        r = self.client.post("/api/meetings/m1/rediarize", json={"num_speakers": 2})
+        self.assertEqual(r.status_code, 409)
+
+    def test_retry_only_failed_jobs_and_reuses_request(self):
+        calls = []
+
+        class FakePipeline:
+            async def run(self, job_id, file_id, title, options):
+                calls.append(("process", file_id, title, options.whisper_model))
+
+            async def run_rediarize(self, job_id, meeting_id, request):
+                calls.append(("rediarize", meeting_id, request.num_speakers))
+
+        app.dependency_overrides[get_pipeline] = lambda: FakePipeline()
+        ok = self.jobs.create(request={"type": "process", "file_id": f"{UUID}.wav", "title": "T",
+                                       "options": {"whisper_model": "small"}})
+        self.assertEqual(self.client.post(f"/api/jobs/{ok.job_id}/retry").status_code, 409)
+
+        self.jobs.update(ok.job_id, status="failed", error="boom")
+        r = self.client.post(f"/api/jobs/{ok.job_id}/retry")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotEqual(r.json()["job_id"], ok.job_id)
+
+        red = self.jobs.create(kind="rediarize", request={"type": "rediarize", "meeting_id": "m1",
+                                                          "request": {"num_speakers": 3}})
+        self.jobs.update(red.job_id, status="failed")
+        self.client.post(f"/api/jobs/{red.job_id}/retry")
+        self.assertEqual(calls, [("process", f"{UUID}.wav", "T", "small"), ("rediarize", "m1", 3)])
+
+    def test_active_job_endpoint(self):
+        self.assertIsNone(self.client.get("/api/jobs/active").json())
+        job = self.jobs.create()
+        self.jobs.update(job.job_id, status="transcribing")
+        self.assertEqual(self.client.get("/api/jobs/active").json()["job_id"], job.job_id)
+
+    def test_diarization_engines_endpoint_reports_missing_models(self):
+        body = self.client.get("/api/diarization/engines").json()
+        names = [e["name"] for e in body["engines"]]
+        self.assertEqual(names, ["pyannote", "speechbrain", "acoustic"])
+        self.assertFalse(body["engines"][0]["available"])
 
 
 class TestLegacyData(APITestCase):
