@@ -174,6 +174,17 @@ Isso habilitará automaticamente:
 * **Ollama (LLM):** Aceleração GPU completa, carregando os pesos da rede neural na VRAM para geração quase instantânea da ata.
 * **Diarização Neural (SpeechBrain ECAPA-TDNN):** Extração de assinaturas biométricas de voz processadas em lotes acelerados por CUDA (`cuda:0`).
 
+> ⚠️ **Fixe a GPU no `.env`.** Qualquer comando `docker compose` sem o `-f docker-compose.gpu.yml` (por exemplo `docker compose run ... download_models` ou o `start.bat`) pode **recriar o container do Ollama sem GPU** — a ata passa a rodar na CPU (5 a 10× mais lenta) sem nenhum erro. Para evitar, descomente no `.env`:
+> ```
+> COMPOSE_PATH_SEPARATOR=;
+> COMPOSE_FILE=docker-compose.yml;docker-compose.gpu.yml
+> ```
+> Assim todo `docker compose` (inclusive `run`, `restart` e o `start.bat`) já usa a GPU. Para conferir onde o modelo está rodando, durante uma ata:
+> ```bash
+> docker exec meeting-ai-ollama ollama ps   # coluna PROCESSOR deve mostrar "100% GPU"
+> ```
+> Se mostrar CPU, recrie com `docker compose up -d` (com o `COMPOSE_FILE` acima) e use "regerar ata" na reunião afetada.
+
 ---
 
 ## ⚙️ Variáveis de Ambiente e Configurações (`.env`)
@@ -184,7 +195,15 @@ Todas as opções do MeetingAI são configuradas centralizadamente via variávei
 
 | Variável | Padrão | Valores Suportados | Descrição |
 | :--- | :--- | :--- | :--- |
-| `OLLAMA_NUM_CTX` | `32768` | `4096` a `131072` | **Janela máxima de contexto do LLM em tokens.** Essencial para reuniões longas. |
+| `OLLAMA_NUM_CTX` | `65536` | `4096` a `131072` | **Teto da janela de contexto do LLM em tokens.** A janela real é planejada por reunião; com 64k a maioria das reuniões cabe numa passada só (sem map-reduce). |
+| `OLLAMA_FLASH_ATTENTION` / `OLLAMA_KV_CACHE_TYPE` | `1` / `q8_0` | — | Serviço `ollama`: flash attention e KV cache em 8 bits (~metade da VRAM do contexto). |
+| `MINUTES_REPEAT_PENALTY` | `1.15` | `0` (desliga) ou `1.05`–`1.3` | Penalidade de repetição já na 1ª tentativa da ata (evita laços que queimavam todo o orçamento de tokens e forçavam nova geração). |
+| `LLM_PROVIDER` | `ollama` | `ollama`, `llamacpp` | `llamacpp` usa o serviço opcional `llama-server` (ver seção própria). |
+| `ALIGNMENT_ENGINE` | `wav2vec2` | `wav2vec2`, `whisper` | Alinhamento forçado das palavras (tempos reais de cada palavra). Sem o modelo baixado, usa os tempos do Whisper. |
+| `VOICE_FEATURES_ENABLED` | `true` | `true`, `false` | Assinaturas de voz: fusão de locutores duplicados e biblioteca de vozes. |
+| `VOICE_MERGE_THRESHOLD` / `VOICE_CROSS_TRACK_THRESHOLD` | `0.70` / `0.60` | `0` a `1` | Similaridade mínima para fundir dois rótulos na mesma faixa / entre faixas (microfone x chamada). |
+| `VOICE_LIBRARY_ENABLED` | `true` | `true`, `false` | Reconhece pessoas já nomeadas por você em reuniões anteriores. |
+| `VOICE_MATCH_THRESHOLD` / `VOICE_MATCH_MARGIN` | `0.65` / `0.08` | `0` a `1` | Similaridade mínima e folga sobre a 2ª pessoa mais parecida para nomear pela voz. |
 | `OLLAMA_MODEL` | `gemma4:12b` | `gemma4:12b`, `qwen2.5:14b`, `llama3.1:8b`, etc. | Modelo de LLM local utilizado para sumarizar e extrair a ata de reunião. |
 | `OLLAMA_BASE_URL` | `http://ollama:11434` | URL válida do Ollama | Endereço do serviço Ollama (no Docker ou host nativo). |
 | `WHISPER_MODEL_SIZE` | `medium` | `tiny`, `base`, `small`, `medium`, `large-v3` | Tamanho do modelo Whisper. `medium` e `large-v3` são recomendados para PT-BR. |
@@ -231,7 +250,7 @@ Você pode ajustar `OLLAMA_NUM_CTX` no seu arquivo `.env` de acordo com a sua GP
 | :--- | :--- | :--- | :--- |
 | **8 GB VRAM ou CPU** | `llama3.2:3b` / `qwen2.5:7b` | `8192` | Reuniões de até 35 a 45 minutos |
 | **12 GB VRAM** (ex: RTX 3060) | `qwen2.5:7b` / `gemma4:12b` | `16384` | Reuniões de até 1h15m |
-| **16 GB VRAM** (ex: RTX 4060 Ti / 5060 Ti) | `qwen2.5:14b` / `gemma4:12b` | `32768` *(Padrão)* | Reuniões de até 2h30m |
+| **16 GB VRAM** (ex: RTX 4060 Ti / 5060 Ti) | `gemma4:12b` (Ollama) ou Qwen3.6-35B-A3B (`llama-server`) | `65536` *(Padrão, com KV q8)* | Reuniões de até ~3h numa passada só |
 | **24 GB VRAM** (ex: RTX 3090 / 4090) | `qwen2.5:14b` / `gemma2:27b` | `65536` | Reuniões de até 5 horas |
 
 ---
@@ -248,6 +267,9 @@ docker compose run --rm -e HF_HUB_OFFLINE=0 app python -m backend.scripts.downlo
 #   https://huggingface.co/pyannote/speaker-diarization-community-1 e use um token de leitura)
 docker compose run --rm -e HF_HUB_OFFLINE=0 app python -m backend.scripts.download_models --whisper medium,large-v3 --hf-token hf_xxx
 ```
+
+O mesmo comando baixa também o **wav2vec2 XLSR-53 português** (alinhamento forçado das palavras, ~1,2 GB; `--skip-aligner` pula).
+O script é **idempotente**: cada modelo é verificado no disco primeiro e só o que falta é baixado. O mesmo comando serve para instalar do zero ou para completar depois de uma atualização (ex.: quando uma versão nova passa a usar um modelo novo). As opções `--skip-whisper`, `--skip-speechbrain`, `--skip-pyannote` e `--skip-aligner` são só atalhos para não nem verificar um modelo.
 
 O token é usado só nesse comando e não é gravado. Depois disso, tudo roda offline. Se um modelo escolhido na interface não estiver no disco, o processamento falha com a mensagem de como baixá-lo (nada é baixado em segundo plano). `GET /api/diarization/engines` mostra quais motores de diarização estão disponíveis.
 
@@ -290,6 +312,38 @@ Motores plugáveis, escolhidos por `DIARIZATION_ENGINE` (padrão `auto`, na orde
 
 Depois da diarização, o **alinhamento por frase** decide o locutor de cada frase pelo voto ponderado das palavras. **Isolamento multi-faixa:** em gravações com várias faixas (OBS Studio), cada faixa é diarizada separadamente e as falas são intercaladas.
 
+### 🧬 Assinaturas de voz: locutores duplicados e biblioteca de vozes
+
+Depois da diarização, cada locutor recebe uma **assinatura de voz** (média dos embeddings SpeechBrain ECAPA dos trechos mais longos dele — o mesmo modelo local já usado como motor de diarização).
+
+- **Fusão de duplicados:** rótulos com vozes muito parecidas viram uma pessoa só. Vale dentro de uma faixa (o diarizador às vezes divide alguém em dois) e **entre faixas** — numa gravação do OBS, quem fala no microfone também aparece no áudio da chamada e antes virava dois locutores. Dois canais de microfone individuais nunca são fundidos entre si. Se você fixar o número de pessoas (re-diarizar com N), a fusão dentro da faixa é desligada.
+- **Biblioteca de vozes:** ao dar nome a um locutor, a voz dele é cadastrada (ou refinada, se a pessoa já existir). Nas próximas reuniões, quem é reconhecido aparece com o nome antes da ata — e o LLM já recebe "Locutor 2 — identificado pela voz: Ariel". Só nomes dados **por você** alimentam a biblioteca (nomes inferidos pelo LLM ou pela voz não). A aba **Ajustes** lista as vozes e permite apagá-las.
+- **Limiares calibrados com gravações reais (ECAPA):** mesma pessoa em reuniões diferentes ficou entre 0,79 e 0,93 de similaridade; a mesma pessoa dividida em dois rótulos na mesma faixa, 0,90; pessoas diferentes, no máximo 0,55.
+- **Participantes informados** viram um teto para a diarização (participantes + 1) quando o número de pessoas não é informado.
+
+> As assinaturas são **dados biométricos**: ficam só na tabela `voiceprints` do `data/meetings.db` e nunca saem da máquina. `VOICE_LIBRARY_ENABLED=false` desliga o cadastro/reconhecimento.
+
+### 🎯 Alinhamento forçado das palavras (wav2vec2)
+
+Os tempos por palavra do Whisper são aproximados; uma palavra "deslocada" cai no turno do locutor errado. Com `ALIGNMENT_ENGINE=wav2vec2`, um modelo CTC em português (`jonatasgrosman/wav2vec2-large-xlsr-53-portuguese`, o mesmo que o WhisperX usa para PT) reposiciona cada palavra no áudio antes da atribuição de locutores. O texto não muda; números e símbolos sem letras alinháveis são interpolados. O resultado fica em checkpoint (re-diarizar não refaz).
+
+---
+
+## 🧠 LLM maior com `llama-server` (opcional)
+
+Com 16 GB de VRAM e bastante RAM, modelos MoE como o **Qwen3.6-35B-A3B** (35B no total, ~3B ativos por token) rodam bem deixando os *experts* na RAM e a atenção/KV na GPU — controle que o `llama-server` oferece (`--n-cpu-moe`).
+
+1. Baixe o GGUF (ex.: `Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf` da Unsloth) para `data/llamacpp/`.
+2. No `.env`: `LLM_PROVIDER=llamacpp` (e, se o arquivo tiver outro nome, `LLAMACPP_MODEL_FILE=...`).
+3. Suba com o perfil: `docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile llamacpp up -d`.
+
+- `LLAMACPP_N_CPU_MOE` (padrão `24`): quantas camadas de experts ficam na CPU. **O llama-server mantém o modelo carregado o tempo todo**, então deixe espaço na VRAM para Whisper + pyannote (~5 GB): ajuste até o `llama-server` usar ~10 GB (`nvidia-smi`).
+- `LLAMACPP_CTX` (padrão `65536`) deve ser igual nos dois lados (servidor e app) — o compose já usa a mesma variável.
+- `LLAMACPP_EXTRA_ARGS` para flags extras (ex.: `--mmproj ...` se a sua versão exigir o projetor multimodal).
+- O serviço não expõe porta: só a aplicação o acessa pela rede interna do Docker.
+
+O log de cada ata mostra o tempo de **carga do modelo**, de **leitura do prompt** (tok/s) e de **geração** (tok/s) — útil para comparar Ollama x llama-server no seu hardware.
+
 ---
 
 ## 🧪 Verificação e Testes Automatizados
@@ -331,6 +385,8 @@ Quando a aplicação estiver rodando, a documentação Swagger interativa pode s
 | `POST` | `/api/meetings/{id}/speakers/merge` | Mescla locutores (`source_ids` → `target_id`) |
 | `POST` | `/api/meetings/{id}/segments/reassign` | Move trechos para outro locutor ou para um novo |
 | `GET` | `/api/diarization/engines` | Motores de diarização disponíveis e motivo dos indisponíveis |
+| `GET` | `/api/voices` | Biblioteca de vozes (nomes e estatísticas; os vetores nunca saem do banco) |
+| `DELETE` | `/api/voices/{id}` | Apaga a assinatura de voz de uma pessoa |
 
 ---
 
@@ -339,3 +395,4 @@ Quando a aplicação estiver rodando, a documentação Swagger interativa pode s
 - **100% Local:** Todo o processamento de áudio, transcrição e inferência do LLM é executado estritamente na sua máquina dentro dos containers Docker.
 - **Sem Telemetria:** Nenhuma gravação, voz ou texto de reunião sai da sua rede. Telemetria do Hugging Face e do pyannote desligada; a interface não carrega fontes nem scripts de CDNs externos.
 - **Modo Offline Estrito:** `HF_HUB_OFFLINE=1` por padrão; modelos só do disco local.
+- **Biometria de voz local:** as assinaturas da biblioteca de vozes ficam só no SQLite local e podem ser apagadas na aba Ajustes (`VOICE_LIBRARY_ENABLED=false` desliga).

@@ -11,6 +11,9 @@ BASE_PROMPT_PT = (
 )
 # O Whisper usa no máximo ~224 tokens de prompt; mantemos folga.
 MAX_PROMPT_CHARS = 600
+# `hotwords` ocupa no máximo metade do prompt (~110 tokens). Listas longas demais também
+# aumentam o risco de o Whisper "ouvir" termos que ninguém disse, então limitamos.
+MAX_HOTWORDS_CHARS = 300
 
 
 def build_initial_prompt(language: str, terms: Optional[Sequence[str]] = None) -> Optional[str]:
@@ -24,6 +27,24 @@ def build_initial_prompt(language: str, terms: Optional[Sequence[str]] = None) -
         vocab = "Vocabulário: " + ", ".join(dict.fromkeys(terms)) + "."
         base = f"{base} {vocab}".strip()
     return base[:MAX_PROMPT_CHARS] or None
+
+
+def build_hotwords(terms: Optional[Sequence[str]] = None) -> Optional[str]:
+    """
+    Nomes de participantes e glossário como `hotwords` do faster-whisper.
+
+    Por que não só o `initial_prompt`: com `condition_on_previous_text=False` (necessário para
+    evitar laços de alucinação), o faster-whisper descarta o `initial_prompt` depois da
+    PRIMEIRA janela de 30 s. Os `hotwords` são reinjetados em todas as janelas.
+    """
+    out: List[str] = []
+    size = 0
+    for t in dict.fromkeys(t.strip() for t in (terms or []) if t and t.strip()):
+        if size + len(t) + 2 > MAX_HOTWORDS_CHARS:
+            break
+        out.append(t)
+        size += len(t) + 2
+    return ", ".join(out) or None
 
 
 class TranscriptionService:
@@ -132,8 +153,12 @@ class TranscriptionService:
         logger.info(f"Iniciando transcrição de {audio_path.name} com modelo {model_size} (idioma={language})...")
         model = cls.get_model(model_size=model_size)
 
-        # Prompt contextual: pontuação PT-BR + nomes dos participantes e glossário informados
+        # Prompt contextual: pontuação PT-BR + nomes dos participantes e glossário informados.
+        # O initial_prompt só vale para a 1ª janela; os hotwords valem para o áudio todo.
         initial_prompt = build_initial_prompt(language, prompt_terms)
+        hotwords = build_hotwords(prompt_terms)
+        if hotwords:
+            logger.info("Hotwords do Whisper (todas as janelas): %s", hotwords)
 
         def _run_transcribe(m):
             segments, info = m.transcribe(
@@ -141,6 +166,7 @@ class TranscriptionService:
                 language=language if language != "auto" else None,
                 beam_size=beam_size,
                 initial_prompt=initial_prompt,
+                hotwords=hotwords,
                 condition_on_previous_text=False,
                 hallucination_silence_threshold=2.0,
                 no_speech_threshold=0.6,

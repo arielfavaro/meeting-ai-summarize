@@ -29,6 +29,8 @@ from backend.services.jobs import JobRegistry, JobReporter
 from backend.services.minutes.generator import MinutesGenerator, MinutesRequest
 from backend.services.speakers import present_meeting, sync_display_names
 from backend.services.transcription import TranscriptionService
+from backend.services.voice.embedder import SpeakerVoice
+from backend.services.voice.service import VoiceService, relabel_with_groups
 
 logger = logging.getLogger("meeting_ai.pipeline")
 
@@ -38,13 +40,38 @@ def apply_speaker_suggestions(meeting: MeetingDetail, log: Optional[Callable[...
     if not meeting.summary:
         return
     for sug in meeting.summary.speaker_suggestions:
-        if sug.applied and meeting.speaker_name_sources.get(sug.speaker_id) != "user":
+        # Nome dado pelo usuário ou reconhecido pela voz vale mais que a inferência do LLM.
+        if sug.applied and meeting.speaker_name_sources.get(sug.speaker_id) not in ("user", "voice"):
             logger.info("Nome inferido: '%s' -> '%s' (%s, conf=%.2f)", sug.speaker_id, sug.name, sug.reason, sug.confidence)
             if log:
                 log(f"Nome identificado: {sug.speaker_id} ➔ {sug.name} ({sug.reason}, {sug.confidence:.0%}).", "success")
             meeting.speaker_map[sug.speaker_id] = sug.name
             meeting.speaker_name_sources[sug.speaker_id] = "llm"
     sync_display_names(meeting)
+
+
+def apply_voice_matches(meeting: MeetingDetail, matches, log: Optional[Callable[..., None]] = None) -> None:
+    """Nomes reconhecidos pela biblioteca de vozes (não sobrescreve nomes do usuário)."""
+    for m in matches:
+        if meeting.speaker_name_sources.get(m.speaker_id) == "user":
+            continue
+        meeting.speaker_map[m.speaker_id] = m.voiceprint.name
+        meeting.speaker_name_sources[m.speaker_id] = "voice"
+        if log:
+            log(f"Voz reconhecida: {m.speaker_id} ➔ {m.voiceprint.name} (similaridade {m.score:.2f}).", "success")
+    sync_display_names(meeting)
+
+
+def speaker_hint(participants: List[str], min_speakers: Optional[int],
+                 max_speakers: Optional[int]) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+    """
+    Participantes informados viram um TETO para a diarização (participantes + 1, para quem não
+    foi listado). Só quando o usuário não informou o número de pessoas.
+    """
+    if min_speakers or max_speakers or not participants:
+        return min_speakers, max_speakers, None
+    cap = max(2, len(participants) + 1)
+    return None, cap, f"{len(participants)} participante(s) informado(s): até {cap} locutores na separação."
 
 
 def _transcription_progress(reporter: JobReporter, base: int, span: float, label: str):
@@ -80,6 +107,8 @@ class MeetingPipeline:
         release_models: bool = False,
         multitrack_dominant_share: float = 0.8,
         multitrack_dedupe_echo: bool = True,
+        voice: Optional[VoiceService] = None,
+        aligner=None,
     ):
         self.jobs = jobs
         self.files = files
@@ -93,6 +122,8 @@ class MeetingPipeline:
         self.release_models = release_models
         self.multitrack_dominant_share = multitrack_dominant_share
         self.multitrack_dedupe_echo = multitrack_dedupe_echo
+        self.voice = voice
+        self.aligner = aligner  # alinhamento forçado (wav2vec2); None = tempos do Whisper
 
     # ------------------------------------------------------------ casos de uso
     async def run(self, job_id: str, file_id: str, title: str, options: ProcessOptions) -> None:
@@ -120,8 +151,12 @@ class MeetingPipeline:
         wav_path, wav_filename, duration = await self._master_audio(file_id, raw_audio_path, tracks, reporter)
 
         diarizer = self.diarizer_factory(options.hf_token)
-        aligned, engine_used = await self._speech_to_segments(
-            file_id, raw_audio_path, tracks, wav_path, diarizer, options.min_speakers, options.max_speakers,
+        min_spk, max_spk, hint = speaker_hint(options.context.participants, options.min_speakers,
+                                              options.max_speakers)
+        if hint:
+            reporter.log(hint)
+        aligned, engine_used, voices = await self._speech_to_segments(
+            file_id, raw_audio_path, tracks, wav_path, diarizer, min_spk, max_spk,
             options.whisper_model, options.language, terms, reporter)
 
         created_at = clock.now()
@@ -141,6 +176,7 @@ class MeetingPipeline:
                                  language=options.language, min_speakers=options.min_speakers,
                                  max_speakers=options.max_speakers, diarization_engine=engine_used),
         )
+        await self._identify_voices(meeting, voices, reporter)
         await self._summarize_and_save(meeting, options.ollama_model, reporter)
 
     async def _rediarize(self, meeting_id: str, request: RediarizeRequest, reporter: JobReporter) -> None:
@@ -164,8 +200,11 @@ class MeetingPipeline:
         terms = [*context.participants, *context.glossary]
 
         diarizer = self.diarizer_factory(None, engine=request.engine) if request.engine else self.diarizer_factory(None)
-        aligned, engine_used = await self._speech_to_segments(
-            src.file_id, raw_audio_path, src.tracks, wav_path, diarizer, min_spk, max_spk,
+        diar_min, diar_max, hint = speaker_hint(context.participants, min_spk, max_spk)
+        if hint:
+            reporter.log(hint)
+        aligned, engine_used, voices = await self._speech_to_segments(
+            src.file_id, raw_audio_path, src.tracks, wav_path, diarizer, diar_min, diar_max,
             src.whisper_model, src.language, terms, reporter)
 
         speaker_map, sources = carry_speaker_names(meeting, aligned)
@@ -177,6 +216,7 @@ class MeetingPipeline:
         meeting.source = src.model_copy(update={"min_speakers": min_spk, "max_speakers": max_spk,
                                                 "diarization_engine": engine_used})
         sync_display_names(meeting)
+        await self._identify_voices(meeting, voices, reporter)
         await self._summarize_and_save(meeting, request.ollama_model, reporter)
 
     # ------------------------------------------------------------------ etapas
@@ -219,7 +259,7 @@ class MeetingPipeline:
         self, file_id: str, raw_audio_path: Optional[Path], tracks: List[int], master_wav: Path,
         diarizer: DiarizationService, min_speakers: Optional[int], max_speakers: Optional[int],
         whisper_model: str, language: str, terms: List[str], reporter: JobReporter,
-    ) -> Tuple[List[SpeakerSegment], Optional[str]]:
+    ) -> Tuple[List[SpeakerSegment], Optional[str], Dict[str, SpeakerVoice]]:
         n = len(tracks)
         multi = n > 1
         if multi:
@@ -261,6 +301,12 @@ class MeetingPipeline:
         if self.release_models:
             await asyncio.to_thread(diarizer.release)
 
+        # 1b) Assinaturas de voz: funde rótulos da mesma pessoa (na faixa e entre faixas)
+        exact_count = bool(min_speakers and max_speakers and min_speakers == max_speakers)
+        diarizations, voices = await self._merge_by_voice(
+            file_id, tracks, audio_paths, diarizations, single_speaker_tracks, labels,
+            allow_within_track=not exact_count, reporter=reporter)
+
         # 2) Transcrição de todas as faixas (Whisper carregado uma vez só)
         transcriptions: Dict[int, List[Dict[str, Any]]] = {}
         for i, t in enumerate(tracks):
@@ -283,6 +329,11 @@ class MeetingPipeline:
             await asyncio.to_thread(self.transcriber.release)
             reporter.log("Modelos de áudio liberados da memória antes da ata.")
 
+        # 2b) Alinhamento forçado: tempos reais de cada palavra (atribuição de locutor mais precisa)
+        transcriptions = await self._force_align(file_id, tracks, audio_paths, transcriptions, labels,
+                                                 {"model": whisper_model, "language": language, "terms": terms},
+                                                 reporter)
+
         # 3) Alinhamento por frase e intercalação das faixas
         reporter.step("Sincronizando falas e locutores (atribuição por frase)...", status="aligning", progress=75)
         per_track = [align_transcription_with_diarization(transcriptions[t], diarizations[t]) for t in tracks]
@@ -291,12 +342,105 @@ class MeetingPipeline:
             if removed:
                 reporter.log(f"{removed} fala(s) duplicada(s) por eco entre faixas removida(s) "
                              "(microfone captando o alto-falante).", "success")
-        aligned = merge_multitrack_segments(per_track) if multi else per_track[0]
+        # Com as vozes, os rótulos já são globais (a mesma pessoa tem o mesmo rótulo em todas as faixas).
+        aligned = merge_multitrack_segments(per_track, relabel=voices is None) if multi else per_track[0]
         speakers = len({s.speaker_id for s in aligned})
         reporter.step(f"Alinhamento concluído: {len(aligned)} falas, {speakers} locutor(es).", progress=80,
                       level="success")
         engines_used.discard(None)
-        return aligned, ",".join(sorted(engines_used)) or None
+        present = {s.speaker_id for s in aligned}
+        return aligned, ",".join(sorted(engines_used)) or None, {k: v for k, v in (voices or {}).items() if k in present}
+
+    async def _force_align(self, file_id: str, tracks: List[int], audio_paths: Dict[int, Path],
+                           transcriptions: Dict[int, List[Dict[str, Any]]], labels: Dict[int, str],
+                           asr_params: Dict[str, Any], reporter: JobReporter) -> Dict[int, List[Dict[str, Any]]]:
+        if not self.aligner:
+            return transcriptions
+        reason = self.aligner.unavailable_reason()
+        if reason:
+            reporter.log(f"Alinhamento forçado indisponível ({reason}); usando os tempos do Whisper.")
+            return transcriptions
+        out = dict(transcriptions)
+        n = len(tracks)
+        for i, t in enumerate(tracks):
+            params = {"track": t, **asr_params, "aligner": self.aligner.model_dir.name}
+            cached = self.artifacts.load(file_id, "word_alignment", params)
+            if cached is None:
+                reporter.step(f"{labels[t]}Alinhando palavras ao áudio (wav2vec2)...", status="aligning",
+                              progress=75 + int(i / n * 4))
+                on_progress = _transcription_progress(reporter, base=75 + int(i / n * 4), span=4 / n,
+                                                      label=f"{labels[t]}Alinhamento")
+                try:
+                    segs, ok, tried = await asyncio.to_thread(self.aligner.refine, audio_paths[t],
+                                                              transcriptions[t], on_progress)
+                except Exception as e:
+                    logger.warning("Alinhamento forçado falhou: %s", e, exc_info=True)
+                    reporter.log(f"Alinhamento forçado falhou ({e}); usando os tempos do Whisper.", "warning")
+                    return transcriptions
+                cached = {"segments": segs, "ok": ok, "tried": tried}
+                self.artifacts.save(file_id, "word_alignment", params, cached)
+                reporter.log(f"{labels[t]}Palavras alinhadas ao áudio em {ok}/{tried} trechos.", "success")
+            out[t] = cached["segments"]
+        if self.release_models:
+            await asyncio.to_thread(self.aligner.release)
+        return out
+
+    async def _merge_by_voice(self, file_id: str, tracks: List[int], audio_paths: Dict[int, Path],
+                              diarizations: Dict[int, List[Dict[str, Any]]], single_speaker_tracks: set,
+                              labels: Dict[int, str], allow_within_track: bool, reporter: JobReporter):
+        """
+        Extrai a voz de cada (faixa, locutor) e funde rótulos da mesma pessoa. Retorna as diarizações
+        com rótulos globais e a voz de cada rótulo — ou (diarizações originais, None) se indisponível.
+        """
+        reason = self.voice.unavailable_reason() if self.voice else "não configurado"
+        if reason:
+            if self.voice:
+                reporter.log(f"Assinaturas de voz indisponíveis ({reason}); locutores sem fusão por voz.", "warning")
+            return diarizations, None
+
+        voices: Dict[Tuple[int, str], SpeakerVoice] = {}
+        for i, t in enumerate(tracks):
+            params = {"track": t, "turns": _turns_fingerprint(diarizations[t])}
+            cached = self.artifacts.load(file_id, "voices", params)
+            if cached is None:
+                reporter.step(f"{labels[t]}Extraindo assinaturas de voz...", progress=33)
+                try:
+                    found = await asyncio.to_thread(self.voice.voices_for_turns, audio_paths[t], diarizations[t])
+                except Exception as e:  # sem vozes o processamento continua como antes
+                    logger.warning("Falha ao extrair vozes: %s", e, exc_info=True)
+                    reporter.log(f"Não foi possível extrair as assinaturas de voz ({e}).", "warning")
+                    return diarizations, None
+                cached = {label: v.to_json() for label, v in found.items()}
+                self.artifacts.save(file_id, "voices", params, cached)
+            for label, data in cached.items():
+                voices[(i, label)] = SpeakerVoice.from_json(data)
+        if self.release_models:
+            await asyncio.to_thread(self.voice.release)  # libera a VRAM antes do Whisper
+
+        track_of = {t: i for i, t in enumerate(tracks)}
+        by_index = {track_of[t]: turns for t, turns in diarizations.items()}
+        plan = self.voice.plan_merges(voices, single_speaker_tracks, allow_within_track=allow_within_track)
+        relabeled_idx, label_voices = relabel_with_groups(by_index, plan.groups, voices)
+        before = sum(len({x["speaker"] for x in turns}) for turns in diarizations.values())
+        after = len({x["speaker"] for turns in relabeled_idx.values() for x in turns})
+        if after < before:
+            reporter.log(f"Assinaturas de voz: {before} rótulos de locutor → {after} pessoa(s) "
+                         f"({len(plan.decisions)} fusão(ões) por similaridade de voz).", "success")
+        for d in plan.decisions:
+            logger.info("Fusão por voz: %s + %s (similaridade %.2f)", d.kept, d.merged, d.similarity)
+        return {tracks[i]: turns for i, turns in relabeled_idx.items()}, label_voices
+
+    async def _identify_voices(self, meeting: MeetingDetail, voices: Dict[str, SpeakerVoice],
+                               reporter: JobReporter) -> None:
+        """Nomeia locutores reconhecidos pela biblioteca de vozes (antes da ata: o LLM já recebe os nomes)."""
+        if not self.voice or not voices:
+            return
+        try:
+            matches = await asyncio.to_thread(self.voice.identify, voices)
+        except Exception as e:
+            logger.warning("Falha na identificação por voz: %s", e, exc_info=True)
+            return
+        apply_voice_matches(meeting, matches, reporter.log)
 
     async def _summarize_and_save(self, meeting: MeetingDetail, model: Optional[str], reporter: JobReporter) -> None:
         reporter.step("Gerando ata com IA local (Ollama)...", status="summarizing", progress=82)
@@ -318,6 +462,13 @@ class MeetingPipeline:
         reporter.step("Processamento concluído! Reunião salva no banco local.", status="completed", progress=100,
                       level="success")
         logger.info("[%s] Reunião %s salva.", reporter.job_id, meeting.id)
+
+
+def _turns_fingerprint(turns: List[Dict[str, Any]]) -> str:
+    """Identifica a diarização usada (o cache de vozes vale só para os mesmos turnos)."""
+    import hashlib
+    payload = ";".join(f"{t['start']:.2f},{t['end']:.2f},{t['speaker']}" for t in turns)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _meeting_date(meeting: MeetingDetail) -> datetime:

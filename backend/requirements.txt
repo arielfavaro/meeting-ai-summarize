@@ -27,6 +27,9 @@ speechbrain>=1.0.3
 pyannote.audio>=4.0.4,<5
 huggingface-hub>=0.28.1
 
+# Alinhamento forçado das palavras (wav2vec2 PT, lido de diretório local)
+transformers>=4.44,<6
+
 # Base de fusos horários (o container slim não traz; usada pelo APP_TIMEZONE)
 tzdata
 

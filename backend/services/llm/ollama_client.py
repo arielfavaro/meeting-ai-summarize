@@ -11,6 +11,11 @@ from backend.services.llm.loop_guard import LoopGuard
 logger = logging.getLogger(__name__)
 
 
+def _ns(value) -> Optional[float]:
+    """Durações do Ollama vêm em nanossegundos."""
+    return value / 1e9 if isinstance(value, (int, float)) else None
+
+
 class OllamaClient:
     def __init__(self, base_url: str, timeout: float = 900.0, transport: Optional[httpx.AsyncBaseTransport] = None,
                  keep_alive: Optional[str] = None):
@@ -95,6 +100,9 @@ class OllamaClient:
                             result.done_reason = data.get("done_reason")
                             result.prompt_tokens = data.get("prompt_eval_count")
                             result.completion_tokens = data.get("eval_count")
+                            result.load_seconds = _ns(data.get("load_duration"))
+                            result.prompt_seconds = _ns(data.get("prompt_eval_duration"))
+                            result.eval_seconds = _ns(data.get("eval_duration"))
                             break
                         reason = guard.check(content)
                         if reason:

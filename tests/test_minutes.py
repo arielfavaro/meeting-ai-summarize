@@ -2,6 +2,7 @@
 import _env  # noqa: F401  (configura ambiente isolado)
 
 import json
+from pathlib import Path
 import unittest
 from datetime import date, datetime
 
@@ -149,11 +150,26 @@ class TestSinglePass(unittest.IsolatedAsyncioTestCase):
         minutes = await make_generator(llm).generate(make_request())
         self.assertEqual(minutes.source, "llm")
         first, second = llm.calls
-        self.assertIsNone(first["options"])
-        self.assertEqual(second["options"]["repeat_penalty"], 1.15)
+        # a 1ª tentativa já usa penalidade de repetição; a nova tentativa aperta mais
+        self.assertEqual(first["options"]["repeat_penalty"], 1.15)
+        self.assertGreater(second["options"]["repeat_penalty"], first["options"]["repeat_penalty"])
         self.assertGreater(second["temperature"], first["temperature"])
         # janela e orçamento fixos: sem recarregar o modelo e sem gerar mais do mesmo laço
         self.assertEqual((first["num_ctx"], first["num_predict"]), (second["num_ctx"], second["num_predict"]))
+
+    async def test_repeat_penalty_can_be_disabled(self):
+        llm = FakeLLM([minutes_payload()])
+        await make_generator(llm, repeat_penalty=0).generate(make_request())
+        self.assertIsNone(llm.calls[0]["options"])
+
+    async def test_degenerate_output_is_dumped_for_diagnosis(self):
+        import tempfile
+        debug = Path(tempfile.mkdtemp())
+        loop = LLMResponse(content='{"objectives": [' + " " * 200, done_reason="loop", loop_reason="espaços")
+        await make_generator(FakeLLM([loop, minutes_payload()]), debug_dir=debug).generate(make_request())
+        dumps = list(debug.glob("*.txt"))
+        self.assertEqual(len(dumps), 1)
+        self.assertIn("laço", dumps[0].read_text(encoding="utf-8"))
 
     async def test_lists_are_trimmed_if_backend_ignores_schema_limits(self):
         payload = minutes_payload(decisions=[{"description": f"Decisão {i}", "evidence": [4]} for i in range(40)])

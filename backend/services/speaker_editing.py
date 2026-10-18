@@ -40,7 +40,7 @@ def merge_speakers(meeting: MeetingDetail, source_ids: Sequence[str], target_id:
     # O destino herda um nome real de uma das origens se ainda não tiver um.
     if meeting.speaker_name_sources.get(target_id, "default") == "default":
         for src in sources:
-            if meeting.speaker_name_sources.get(src) in ("user", "llm"):
+            if meeting.speaker_name_sources.get(src) in ("user", "voice", "llm"):
                 meeting.speaker_map[target_id] = meeting.speaker_map[src]
                 meeting.speaker_name_sources[target_id] = meeting.speaker_name_sources[src]
                 break
@@ -116,7 +116,7 @@ def carry_speaker_names(old: MeetingDetail, new_segments: Sequence[SpeakerSegmen
             continue
         used_new.add(new_id)
         used_old.add(old_id)
-        if old.speaker_name_sources.get(old_id) in ("user", "llm"):
+        if old.speaker_name_sources.get(old_id) in ("user", "voice", "llm"):
             speaker_map[new_id] = old.speaker_map[old_id]
             sources[new_id] = old.speaker_name_sources[old_id]
     return speaker_map, sources

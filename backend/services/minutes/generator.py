@@ -15,6 +15,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from difflib import SequenceMatcher
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Type, TypeVar
 
@@ -55,17 +56,24 @@ class MinutesConfig:
     max_retries: int = 2
     speaker_name_min_confidence: float = 0.75
     min_ctx: int = 4096
+    # Penalidade de repetição JÁ na 1ª tentativa: com saída por JSON Schema, sem ela o modelo
+    # tende a entrar em laço e queimar todo o orçamento de tokens antes de ser refeito. 0 desliga.
+    repeat_penalty: float = 1.15
+    debug_dir: Optional[Path] = None  # grava respostas degeneradas (laço/corte) para diagnóstico
 
     @classmethod
     def from_settings(cls, s) -> "MinutesConfig":
+        llamacpp = s.LLM_PROVIDER.lower() == "llamacpp"
         return cls(
-            default_model=s.OLLAMA_MODEL,
-            max_ctx=s.OLLAMA_NUM_CTX,
+            default_model=s.LLAMACPP_MODEL if llamacpp else s.OLLAMA_MODEL,
+            max_ctx=s.LLAMACPP_CTX if llamacpp else s.OLLAMA_NUM_CTX,
             num_predict=s.OLLAMA_NUM_PREDICT,
             chunk_tokens=s.MINUTES_CHUNK_TOKENS,
             temperature=s.MINUTES_TEMPERATURE,
             max_retries=s.MINUTES_MAX_RETRIES,
             speaker_name_min_confidence=s.SPEAKER_NAME_MIN_CONFIDENCE,
+            repeat_penalty=s.MINUTES_REPEAT_PENALTY,
+            debug_dir=s.DATA_DIR / "logs" / "llm",
         )
 
 
@@ -96,7 +104,9 @@ def _similar(a: str, b: str, threshold: float = 0.85) -> bool:
     return SequenceMatcher(None, _norm(a), _norm(b)).ratio() >= threshold
 
 
-ANTI_LOOP_OPTIONS = {"repeat_penalty": 1.15, "repeat_last_n": 256}
+REPEAT_LAST_N = 256
+ANTI_LOOP_PENALTY_STEP = 0.05  # a nova tentativa após um laço aperta a penalidade
+ANTI_LOOP_MIN_PENALTY = 1.15
 ANTI_LOOP_TEMPERATURE = 0.35
 
 
@@ -318,16 +328,21 @@ class MinutesGenerator:
             resp = await self.llm.chat(
                 convo, model, schema=schema, num_ctx=num_ctx, num_predict=num_predict,
                 temperature=ANTI_LOOP_TEMPERATURE if anti_loop else self.cfg.temperature,
-                options=ANTI_LOOP_OPTIONS if anti_loop else None,
+                options=self._sampling_options(anti_loop),
                 on_token=ticker,
             )
             logger.info("LLM: %s tokens em %.0fs (motivo=%s, orçamento %d, num_ctx %d).", resp.completion_tokens,
                         time.monotonic() - started, resp.done_reason, num_predict, num_ctx)
+            timing = resp.timing_summary() if hasattr(resp, "timing_summary") else None
+            if timing:
+                logger.info("LLM tempos: %s", timing)
+                emit(f"LLM: {timing}.")
 
             if resp.done_reason in ("length", "loop"):
                 cause = (f"geração em laço ({resp.loop_reason})" if resp.done_reason == "loop"
                          else "resposta cortada pelo limite de tokens")
                 logger.warning("%s. Início: %r ... Fim: %r", cause, resp.content[:200], resp.content[-300:])
+                self._dump_degenerate(resp.content, cause, model)
                 salvaged = self._salvage(resp.content, model_cls)
                 if salvaged is not None:
                     msg = f"{cause.capitalize()}; o conteúdo já gerado foi aproveitado (pode estar incompleto)."
@@ -354,6 +369,27 @@ class MinutesGenerator:
                                                 "Devolva o JSON completo e válido conforme o esquema."},
                 ]
         raise MinutesGenerationError(f"LLM não produziu ata válida após {self.cfg.max_retries + 1} tentativas: {last_error}")
+
+    def _sampling_options(self, anti_loop: bool) -> Optional[Dict]:
+        penalty = self.cfg.repeat_penalty
+        if anti_loop:
+            penalty = max(ANTI_LOOP_MIN_PENALTY, (penalty or 1.0) + ANTI_LOOP_PENALTY_STEP)
+        if not penalty or penalty <= 1.0:
+            return None
+        return {"repeat_penalty": round(penalty, 3), "repeat_last_n": REPEAT_LAST_N}
+
+    def _dump_degenerate(self, content: str, cause: str, model: str) -> None:
+        """Guarda a resposta degenerada em disco (local) para entender o padrão do laço."""
+        if not self.cfg.debug_dir:
+            return
+        try:
+            self.cfg.debug_dir.mkdir(parents=True, exist_ok=True)
+            stamp = clock.now().strftime("%Y%m%d-%H%M%S")
+            path = self.cfg.debug_dir / f"{stamp}_{re.sub(r'[^a-zA-Z0-9]+', '-', model)}.txt"
+            path.write_text(f"# {cause}\n# modelo: {model}\n\n{content}", encoding="utf-8")
+            logger.info("Resposta degenerada salva em %s", path)
+        except OSError:
+            logger.debug("Não foi possível gravar a resposta degenerada", exc_info=True)
 
     @staticmethod
     def _salvage(content: str, model_cls: Type[T]) -> Optional[T]:

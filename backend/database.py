@@ -68,7 +68,23 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
 
 
-MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3]
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    """Biblioteca de vozes: assinaturas (embeddings) de pessoas nomeadas pelo usuário. Só local."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS voiceprints (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            name_key TEXT NOT NULL UNIQUE,
+            vector BLOB NOT NULL,
+            seconds REAL NOT NULL DEFAULT 0,
+            samples INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+
+MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4]
 
 
 @contextmanager
@@ -225,6 +241,50 @@ class JobStore:
             request=json.loads(row["request_json"]) if row["request_json"] else None,
             created_at=row["created_at"], updated_at=row["updated_at"],
         )
+
+
+class VoiceprintStore:
+    """Persistência da biblioteca de vozes (vetores float32 em BLOB)."""
+
+    def __init__(self, db_path: Path):
+        self.db_path = Path(db_path)
+        ensure_schema(self.db_path)
+
+    def list(self) -> List["Voiceprint"]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute("SELECT * FROM voiceprints ORDER BY name COLLATE NOCASE").fetchall()
+        return [self._from_row(r) for r in rows]
+
+    def get_by_name(self, name: str) -> Optional["Voiceprint"]:
+        from backend.services.voice.library import name_key
+        with connect(self.db_path) as conn:
+            row = conn.execute("SELECT * FROM voiceprints WHERE name_key = ?", (name_key(name),)).fetchone()
+        return self._from_row(row) if row else None
+
+    def save(self, vp: "Voiceprint") -> None:
+        import numpy as np
+        from backend.services.voice.library import name_key
+        with connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO voiceprints (id, name, name_key, vector, seconds, samples, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET name = excluded.name, name_key = excluded.name_key,
+                    vector = excluded.vector, seconds = excluded.seconds, samples = excluded.samples,
+                    updated_at = excluded.updated_at
+            """, (vp.id, vp.name, name_key(vp.name), np.asarray(vp.vector, dtype="<f4").tobytes(), vp.seconds,
+                  vp.samples, vp.created_at, vp.updated_at))
+
+    def delete(self, voiceprint_id: str) -> bool:
+        with connect(self.db_path) as conn:
+            return conn.execute("DELETE FROM voiceprints WHERE id = ?", (voiceprint_id,)).rowcount > 0
+
+    @staticmethod
+    def _from_row(row) -> "Voiceprint":
+        import numpy as np
+        from backend.services.voice.library import Voiceprint
+        return Voiceprint(id=row["id"], name=row["name"], vector=np.frombuffer(row["vector"], dtype="<f4").copy(),
+                          seconds=row["seconds"], samples=row["samples"], created_at=row["created_at"],
+                          updated_at=row["updated_at"])
 
 
 _repository: Optional[MeetingRepository] = None

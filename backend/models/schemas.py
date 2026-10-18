@@ -176,7 +176,7 @@ class ProcessOptions(BaseModel):
 # ---------------------------------------------------------------------------
 # Reunião
 # ---------------------------------------------------------------------------
-SpeakerNameSource = Literal["default", "llm", "user"]
+SpeakerNameSource = Literal["default", "llm", "voice", "user"]
 
 
 class MeetingSource(BaseModel):

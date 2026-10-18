@@ -92,6 +92,9 @@ class MeetingApp {
     if (tabName === "history") {
       this.loadMeetingsHistory();
     }
+    if (tabName === "settings" && typeof settingsManager !== "undefined") {
+      settingsManager.loadVoiceLibrary();
+    }
   }
 
   _setupDropzone() {

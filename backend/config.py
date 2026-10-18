@@ -37,18 +37,27 @@ class Settings(BaseSettings):
     MODELS_CACHE_DIR: Path = Path(os.getenv("HF_HOME", DATA_DIR / "models_cache"))
     DB_PATH: Path = DATA_DIR / "meetings.db"
 
+    # LLM local: "ollama" (padrão) ou "llamacpp" (llama-server, para MoE grandes com experts na RAM)
+    LLM_PROVIDER: str = "ollama"
+
     # Ollama (LLM local)
     OLLAMA_BASE_URL: str = "http://ollama:11434"
     OLLAMA_MODEL: str = "gemma4:12b"
-    OLLAMA_NUM_CTX: int = 32768         # teto da janela de contexto
+    OLLAMA_NUM_CTX: int = 65536         # teto da janela (a janela real é planejada por reunião)
     OLLAMA_NUM_PREDICT: int = 4096      # piso de tokens para a resposta; o valor real vem do pior caso do schema
     OLLAMA_TIMEOUT: float = 900.0
     OLLAMA_KEEP_ALIVE: str = "5m"       # quanto tempo o Ollama mantém o modelo na memória após a ata
+
+    # llama-server (llama.cpp) — perfil "llamacpp" do docker-compose
+    LLAMACPP_BASE_URL: str = "http://llamacpp:8080"
+    LLAMACPP_MODEL: str = "qwen3.6-35b-a3b"  # apelido (--alias) do modelo carregado no servidor
+    LLAMACPP_CTX: int = 65536                # deve ser o mesmo -c usado na subida do servidor
 
     # Geração da ata
     MINUTES_CHUNK_TOKENS: int = 6000    # tamanho de cada bloco no modo map-reduce
     MINUTES_TEMPERATURE: float = 0.1
     MINUTES_MAX_RETRIES: int = 2
+    MINUTES_REPEAT_PENALTY: float = 1.15  # penalidade de repetição desde a 1ª tentativa (0 desliga)
     SPEAKER_NAME_MIN_CONFIDENCE: float = 0.75
 
     # Whisper (transcrição)
@@ -69,6 +78,18 @@ class Settings(BaseSettings):
     MULTITRACK_DOMINANT_SHARE: float = 0.8   # 0 desativa
     MULTITRACK_DEDUPE_ECHO: bool = True
 
+    # Alinhamento forçado das palavras (wav2vec2 PT, estilo WhisperX). "whisper" = tempos do próprio Whisper
+    ALIGNMENT_ENGINE: str = "wav2vec2"
+    ALIGNMENT_MODEL_REPO: str = "jonatasgrosman/wav2vec2-large-xlsr-53-portuguese"
+
+    # Assinaturas de voz (SpeechBrain ECAPA local): fusão de locutores e biblioteca de vozes
+    VOICE_FEATURES_ENABLED: bool = True
+    VOICE_MERGE_THRESHOLD: float = 0.70        # mesma faixa: funde rótulos da mesma pessoa
+    VOICE_CROSS_TRACK_THRESHOLD: float = 0.60  # faixas diferentes (microfone x áudio da chamada)
+    VOICE_LIBRARY_ENABLED: bool = True         # reconhece pessoas já nomeadas em outras reuniões
+    VOICE_MATCH_THRESHOLD: float = 0.65
+    VOICE_MATCH_MARGIN: float = 0.08
+
     # GPU: liberar Whisper/diarização da VRAM antes da etapa seguinte (None = automático: só em CUDA)
     RELEASE_MODELS_AFTER_USE: Optional[bool] = None
 
@@ -80,6 +101,10 @@ class Settings(BaseSettings):
     @property
     def pyannote_model_dir(self) -> Path:
         return self.PYANNOTE_MODEL_DIR or (self.MODELS_CACHE_DIR / "pyannote-speaker-diarization-community-1")
+
+    @property
+    def alignment_model_dir(self) -> Path:
+        return self.MODELS_CACHE_DIR / self.ALIGNMENT_MODEL_REPO.split("/")[-1]
 
     @property
     def speechbrain_model_dir(self) -> Path:

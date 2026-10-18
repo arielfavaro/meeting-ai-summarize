@@ -117,6 +117,52 @@ class SettingsManager {
   getHfToken() {
     return localStorage.getItem("meeting_ai_hf_token") || "";
   }
+
+  async loadVoiceLibrary() {
+    const list = document.getElementById("voice-library-list");
+    const status = document.getElementById("voice-library-status");
+    if (!list || !status) return;
+    try {
+      const resp = await fetch("/api/voices");
+      const data = await resp.json();
+      list.innerHTML = "";
+      if (!data.enabled) {
+        status.textContent = `Biblioteca de vozes inativa${data.reason ? ` (${data.reason})` : ""}.`;
+      } else if (data.voices.length === 0) {
+        status.textContent = "Nenhuma voz cadastrada ainda. Dê nome a um locutor em uma reunião para cadastrar.";
+      } else {
+        status.textContent = `${data.voices.length} pessoa(s) conhecida(s).`;
+      }
+      data.voices.forEach((v) => {
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:0.6rem 0.9rem;" +
+          "border:1px solid var(--border-color, rgba(255,255,255,0.1));border-radius:var(--radius-md);";
+        const info = document.createElement("div");
+        const name = document.createElement("strong");
+        name.textContent = v.name;
+        const meta = document.createElement("div");
+        meta.style.cssText = "font-size:0.78rem;color:var(--text-muted);";
+        meta.textContent = `${v.samples} reunião(ões) · ${Math.round(v.seconds / 60)} min de fala`;
+        info.append(name, meta);
+        const btn = document.createElement("button");
+        btn.className = "btn btn-secondary btn-sm";
+        btn.textContent = "Remover";
+        btn.onclick = () => this.deleteVoice(v.id, v.name);
+        row.append(info, btn);
+        list.appendChild(row);
+      });
+    } catch (e) {
+      console.warn("Erro ao carregar biblioteca de vozes:", e);
+      status.textContent = "Não foi possível carregar a biblioteca de vozes.";
+    }
+  }
+
+  async deleteVoice(id, name) {
+    if (!confirm(`Apagar a assinatura de voz de ${name}?`)) return;
+    const resp = await fetch(`/api/voices/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (resp.ok) app.showToast(`Voz de ${name} removida.`);
+    await this.loadVoiceLibrary();
+  }
 }
 
 const settingsManager = new SettingsManager();

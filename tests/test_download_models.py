@@ -68,10 +68,85 @@ class TestDownloadModels(unittest.TestCase):
         calls = []
         with mock.patch.object(dm, "download_whisper", side_effect=RuntimeError("rede caiu")), \
              mock.patch.object(dm, "download_speechbrain", side_effect=lambda token=None: calls.append("sb")), \
+             mock.patch.object(dm, "download_aligner", side_effect=lambda token=None: calls.append("al")), \
              mock.patch.object(dm, "download_pyannote", side_effect=lambda token: calls.append("py") or True):
             code = dm.main(["--whisper", "large-v3", "--hf-token", "hf_x"])
         self.assertEqual(code, 1)
-        self.assertEqual(calls, ["sb", "py"])
+        self.assertEqual(calls, ["sb", "al", "py"])
+
+    def test_aligner_already_present_is_skipped(self):
+        target = self.root / "aligner"
+        target.mkdir()
+        for name in (*dm.ALIGNER_REQUIRED, "pytorch_model.bin"):
+            (target / name).write_text("{}")
+        snapshot = mock.Mock()
+        with mock.patch.object(type(dm.settings), "alignment_model_dir", property(lambda s: target)), \
+             mock.patch.dict(sys.modules, fake_hub(snapshot)):
+            self.assertTrue(dm.download_aligner())
+        snapshot.assert_not_called()
+
+    def test_aligner_downloads_one_weight_format_without_language_model(self):
+        target = self.root / "aligner"
+        seen = {}
+
+        def snapshot(repo, local_dir, token=None, allow_patterns=None, ignore_patterns=None):
+            seen.update(allow=allow_patterns, ignore=ignore_patterns)
+            Path(local_dir).mkdir(parents=True, exist_ok=True)
+            for name in ("config.json", "model.safetensors"):
+                (Path(local_dir) / name).write_text("{}")
+
+        modules = fake_hub(snapshot)
+        modules["huggingface_hub"].list_repo_files = lambda repo, token=None: [
+            "config.json", "vocab.json", "model.safetensors", "pytorch_model.bin", "language_model/lm.binary"]
+        with mock.patch.object(type(dm.settings), "alignment_model_dir", property(lambda s: target)), \
+             mock.patch.dict(sys.modules, modules):
+            self.assertTrue(dm.download_aligner())
+        self.assertEqual(seen["allow"], ["*.json", "model.safetensors"])
+        self.assertEqual(seen["ignore"], ["language_model/*"])
+
+    def test_only_aligner(self):
+        calls = []
+        with mock.patch.object(dm, "download_whisper", side_effect=lambda sizes: calls.append("wh")), \
+             mock.patch.object(dm, "download_aligner", side_effect=lambda token=None: calls.append("al")):
+            code = dm.main(["--skip-whisper", "--skip-speechbrain", "--skip-pyannote"])
+        self.assertEqual((code, calls), (0, ["al"]))
+
+    def test_whisper_already_in_cache_is_not_downloaded_again(self):
+        calls = []
+
+        def download_model(size, cache_dir=None, local_files_only=False):
+            calls.append((size, local_files_only))
+            if local_files_only and size == "large-v3":
+                return "/cache/large-v3"
+            if local_files_only:
+                raise FileNotFoundError(size)
+            return f"/cache/{size}"
+
+        utils = types.ModuleType("faster_whisper.utils")
+        utils.download_model = download_model
+        with mock.patch.dict(sys.modules, {"faster_whisper": types.ModuleType("faster_whisper"),
+                                           "faster_whisper.utils": utils}):
+            self.assertTrue(dm.download_whisper(["large-v3", "medium"]))
+        # large-v3 já estava no disco: só a verificação local; medium: verificação + download
+        self.assertEqual(calls, [("large-v3", True), ("medium", True), ("medium", False)])
+
+    def test_from_scratch_without_flags_checks_everything(self):
+        calls = []
+        with mock.patch.object(dm, "download_whisper", side_effect=lambda sizes: calls.append(("wh", sizes))), \
+             mock.patch.object(dm, "download_speechbrain", side_effect=lambda token=None: calls.append("sb")), \
+             mock.patch.object(dm, "download_aligner", side_effect=lambda token=None: calls.append("al")), \
+             mock.patch.object(dm, "download_pyannote", side_effect=lambda token: calls.append("py")):
+            code = dm.main(["--hf-token", "hf_x"])
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [("wh", [dm.settings.WHISPER_MODEL_SIZE]), "sb", "al", "py"])
+
+    def test_pyannote_on_disk_is_confirmed_even_without_token(self):
+        self.py_dir.mkdir()
+        (self.py_dir / "config.yaml").write_text("pipeline: x")
+        calls = []
+        with mock.patch.object(dm, "download_pyannote", side_effect=lambda token: calls.append(token)):
+            dm.main(["--skip-whisper", "--skip-speechbrain", "--skip-aligner", "--hf-token", ""])
+        self.assertEqual(calls, [""])
 
     def test_pyannote_already_present_is_skipped(self):
         self.py_dir.mkdir()

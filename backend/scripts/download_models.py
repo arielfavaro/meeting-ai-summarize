@@ -9,6 +9,8 @@ Rode uma vez (com internet), depois deixe HF_HUB_OFFLINE=1: em processamento nen
 
 - Whisper (Faster-Whisper/CTranslate2) → data/models_cache (mesmo cache usado pela aplicação)
 - SpeechBrain ECAPA-TDNN (público)     → data/models_cache/speechbrain_ecapa
+- wav2vec2 XLSR-53 português (público, alinhamento forçado das palavras)
+                                        → data/models_cache/wav2vec2-large-xlsr-53-portuguese
 - pyannote speaker-diarization-community-1 (gratuito, mas exige aceitar os termos em
   https://huggingface.co/pyannote/speaker-diarization-community-1 e um token de leitura)
                                         → data/models_cache/pyannote-speaker-diarization-community-1
@@ -33,6 +35,12 @@ def download_whisper(sizes):
     from faster_whisper.utils import download_model
     for size in sizes:
         print(f"→ Whisper '{size}'...")
+        try:  # já no disco? (sem rede)
+            path = download_model(size, cache_dir=str(settings.MODELS_CACHE_DIR), local_files_only=True)
+            print(f"  já presente no disco (nada a baixar): {path}")
+            continue
+        except Exception:  # noqa: BLE001 - não está no cache: baixa
+            pass
         path = download_model(size, cache_dir=str(settings.MODELS_CACHE_DIR))
         print(f"  ok: {path}")
     return True
@@ -75,6 +83,35 @@ def download_speechbrain(token=None):
     return True
 
 
+ALIGNER_REQUIRED = ("config.json", "vocab.json", "preprocessor_config.json")
+
+
+def download_aligner(token=None):
+    from huggingface_hub import snapshot_download
+    target = settings.alignment_model_dir
+    print(f"→ wav2vec2 (alinhamento de palavras) → {target}")
+    has_weights = any(target.glob("*.bin")) or any(target.glob("*.safetensors"))
+    if _files_ready(target, ALIGNER_REQUIRED) and has_weights:
+        print("  já presente no disco (nada a baixar)")
+        return True
+    _replace_symlinks(target)
+    repo = settings.ALIGNMENT_MODEL_REPO
+    # Só um formato de pesos (safetensors se houver) e nada do modelo de linguagem (KenLM), que não é usado.
+    try:
+        from huggingface_hub import list_repo_files
+        files = set(list_repo_files(repo, token=token or None))
+    except Exception:  # noqa: BLE001 - sem a listagem, baixa o .bin (formato mais comum nesses repositórios)
+        files = set()
+    weights = "model.safetensors" if "model.safetensors" in files else "pytorch_model.bin"
+    snapshot_download(repo, local_dir=str(target), token=token or None,
+                      allow_patterns=["*.json", weights], ignore_patterns=["language_model/*"])
+    if not (target / "config.json").exists() or not (target / weights).exists():
+        print(f"  ✗ arquivos do modelo incompletos em {target}")
+        return False
+    print("  ok")
+    return True
+
+
 def download_pyannote(token):
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
@@ -101,13 +138,19 @@ def download_pyannote(token):
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Baixa os modelos para uso 100% offline.")
+    parser = argparse.ArgumentParser(
+        description="Baixa os modelos para uso 100% offline. Idempotente: o que já está no disco é "
+                    "verificado e pulado, então o mesmo comando serve para instalar do zero ou completar "
+                    "o que faltar. As opções --skip-* só servem para economizar download/tempo.")
     parser.add_argument("--whisper", default=settings.WHISPER_MODEL_SIZE,
-                        help="Tamanhos do Whisper separados por vírgula (ex.: medium,large-v3). Vazio = pular.")
+                        help="Tamanhos do Whisper separados por vírgula (padrão: WHISPER_MODEL_SIZE, "
+                             f"hoje '{settings.WHISPER_MODEL_SIZE}'). Ex.: medium,large-v3.")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""),
                         help="Token do Hugging Face (só para o pyannote, que é 'gated').")
-    parser.add_argument("--skip-speechbrain", action="store_true")
-    parser.add_argument("--skip-pyannote", action="store_true")
+    parser.add_argument("--skip-whisper", action="store_true", help="Não verificar/baixar o Whisper.")
+    parser.add_argument("--skip-speechbrain", action="store_true", help="Não verificar/baixar o SpeechBrain.")
+    parser.add_argument("--skip-pyannote", action="store_true", help="Não verificar/baixar o pyannote.")
+    parser.add_argument("--skip-aligner", action="store_true", help="Não verificar/baixar o wav2vec2 de alinhamento.")
     args = parser.parse_args(argv)
 
     settings.ensure_dirs()
@@ -121,16 +164,18 @@ def main(argv=None) -> int:
             print(f"  ✗ {name}: {type(e).__name__}: {e}")
             results[name] = False
 
-    sizes = [s.strip() for s in args.whisper.split(",") if s.strip()]
+    sizes = [] if args.skip_whisper else [s.strip() for s in args.whisper.split(",") if s.strip()]
     if sizes:
         step("Whisper", download_whisper, sizes)
     if not args.skip_speechbrain:
         step("SpeechBrain", download_speechbrain, args.hf_token)
+    if not args.skip_aligner and settings.ALIGNMENT_ENGINE.lower() == "wav2vec2":
+        step("Alinhamento (wav2vec2)", download_aligner, args.hf_token)
     if not args.skip_pyannote:
-        if args.hf_token:
-            step("pyannote", download_pyannote, args.hf_token)
+        if args.hf_token or (settings.pyannote_model_dir / "config.yaml").exists():
+            step("pyannote", download_pyannote, args.hf_token)  # já presente: só confirma, sem token
         else:
-            print("→ pyannote ignorado (sem --hf-token). A diarização usará o SpeechBrain.")
+            print("→ pyannote ignorado (sem --hf-token e não está no disco). A diarização usará o SpeechBrain.")
 
     print("\nResumo: " + ", ".join(f"{k} {'ok' if v else 'FALHOU'}" for k, v in results.items()))
     print("Para garantir que nada saia da máquina, mantenha HF_HUB_OFFLINE=1 (padrão do docker-compose).")

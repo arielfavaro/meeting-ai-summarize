@@ -95,9 +95,17 @@ class PyannoteEngine:
                 log(f"pyannote: {STEP_LABELS.get(step_name, step_name)}...")
 
         output = pipeline({"waveform": waveform, "sample_rate": sr}, hook=hook, **kwargs)
-        annotation = (getattr(output, "exclusive_speaker_diarization", None)
-                      or getattr(output, "speaker_diarization", None)
-                      or output)
+        # pyannote 4 devolve DiarizeOutput; versões antigas, a Annotation direto. Atenção: uma
+        # Annotation VAZIA é "falsy", então não dá para encadear com `or` (cairia no DiarizeOutput).
+        annotation = None
+        for attr in ("exclusive_speaker_diarization", "speaker_diarization"):
+            annotation = getattr(output, attr, None)
+            if annotation is not None:
+                break
+        if annotation is None:
+            annotation = output
+        if not hasattr(annotation, "itertracks"):
+            raise RuntimeError(f"saída inesperada do pyannote: {type(output).__name__}")
         turns = [{"start": seg.start, "end": seg.end, "speaker": label}
                  for seg, _, label in annotation.itertracks(yield_label=True)]
         turns = relabel_by_first_appearance(turns)

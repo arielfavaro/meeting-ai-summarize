@@ -243,7 +243,12 @@ class TestRobustness(APITestCase):
         self.assertEqual(self.client.get("/api/jobs/active").json()["job_id"], job.job_id)
 
     def test_diarization_engines_endpoint_reports_missing_models(self):
-        body = self.client.get("/api/diarization/engines").json()
+        # Isola do modelo real: dentro do container o pyannote pode estar baixado em /app/data/models_cache.
+        from unittest import mock
+        from backend.config import settings
+        missing = self.tmp / "sem-modelo"
+        with mock.patch.object(type(settings), "pyannote_model_dir", property(lambda s: missing)):
+            body = self.client.get("/api/diarization/engines").json()
         names = [e["name"] for e in body["engines"]]
         self.assertEqual(names, ["pyannote", "speechbrain", "acoustic"])
         self.assertFalse(body["engines"][0]["available"])

@@ -244,11 +244,13 @@ def align_transcription_with_diarization(
 
 
 def merge_multitrack_segments(
-    track_results: List[List[SpeakerSegment]]
+    track_results: List[List[SpeakerSegment]],
+    relabel: bool = True,
 ) -> List[SpeakerSegment]:
     """
     Combina segmentos de múltiplas faixas de áudio ativas.
-    1. Reatribui locutores de forma sequencial contínua (ex: Locutor 1 na faixa A, Locutores 2, 3, 4 na faixa B).
+    1. Reatribui locutores de forma sequencial contínua (ex: Locutor 1 na faixa A, Locutores 2, 3, 4 na faixa B),
+       a menos que `relabel=False` (rótulos já globais, vindos da fusão por voz).
     2. Intercala todos os trechos cronologicamente por tempo de início (start).
     3. Renumera os IDs de 1 a N.
     """
@@ -266,6 +268,8 @@ def merge_multitrack_segments(
         track_speaker_map = {}
         for seg in segments:
             local_spk = seg.speaker
+            if not relabel:  # rótulos já globais (fusão por voz entre faixas)
+                track_speaker_map[local_spk] = local_spk
             if local_spk not in track_speaker_map:
                 track_speaker_map[local_spk] = f"Locutor {global_speaker_counter}"
                 global_speaker_counter += 1

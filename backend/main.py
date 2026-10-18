@@ -27,7 +27,9 @@ from backend.config import settings
 from backend.database import MeetingRepository
 from backend.dependencies import (
     get_artifacts, get_file_store, get_jobs, get_llm_client, get_minutes_generator, get_pipeline, get_repo,
+    get_voice_service,
 )
+from backend.services.voice.service import VoiceService
 from backend.services.artifacts import ArtifactStore
 from backend.services.diarization import DiarizationService
 from backend.models.schemas import (
@@ -326,20 +328,35 @@ async def reassign_meeting_segments(meeting_id: str, req: ReassignSegmentsReques
     return present_meeting(meeting)
 
 
+async def _enroll_voices(voice: VoiceService, audio_path: Path, segments, names: dict) -> None:
+    """Tarefa em segundo plano: cadastra na biblioteca a voz dos locutores nomeados pelo usuário."""
+    try:
+        enrolled = await asyncio.to_thread(voice.enroll_from_meeting, audio_path, segments, names)
+        if enrolled:
+            logger.info("Biblioteca de vozes atualizada: %s", ", ".join(enrolled))
+    except Exception:
+        logger.warning("Falha ao cadastrar vozes na biblioteca", exc_info=True)
+
+
 @app.put("/api/meetings/{meeting_id}/speakers")
 async def update_meeting_speakers(
     meeting_id: str,
     req: UpdateSpeakersRequest,
+    background: BackgroundTasks,
     repo: MeetingRepository = Depends(get_repo),
     minutes: MinutesGenerator = Depends(get_minutes_generator),
+    files: FileStore = Depends(get_file_store),
+    voice: VoiceService = Depends(get_voice_service),
 ):
     """
     Renomeia locutores pelo ID estável (ex.: {"Locutor 1": "Mariana"}).
     A ata e as exportações refletem o novo nome imediatamente, sem regerar via LLM.
+    Nomes dados pelo usuário alimentam a biblioteca de vozes (em segundo plano, só local).
     """
     meeting = _load_meeting(repo, meeting_id)
     ids = set(meeting.speaker_ids())
     by_display = {meeting.display_name(sid): sid for sid in ids}
+    confirmed = {}
 
     for key, new_name in req.speaker_map.items():
         sid = key if key in ids else by_display.get(key)  # aceita o nome atual por compatibilidade
@@ -347,8 +364,11 @@ async def update_meeting_speakers(
             raise HTTPException(status_code=400, detail=f"Locutor '{key}' não existe nesta reunião.")
         new_name = (new_name or "").strip()
         if new_name and new_name != sid:
+            # A interface reenvia todos os nomes: só o que MUDOU vira nome do usuário (e vai para a
+            # biblioteca de vozes). Nomes inferidos pelo LLM/voz e mantidos não são "confirmados".
             if new_name != meeting.speaker_map.get(sid):
                 meeting.speaker_name_sources[sid] = "user"
+                confirmed[sid] = new_name
             meeting.speaker_map[sid] = new_name
         else:
             meeting.speaker_map[sid] = sid
@@ -359,7 +379,30 @@ async def update_meeting_speakers(
         await _regenerate(meeting, minutes, req.ollama_model)
 
     repo.save(meeting)
+    if confirmed and voice.library_active:
+        try:
+            audio_path = files.audio_path(meeting.audio_filename)
+        except (FileNotFoundError, ValueError):
+            audio_path = None
+        if audio_path and audio_path.exists():
+            background.add_task(_enroll_voices, voice, audio_path, list(meeting.segments), confirmed)
     return present_meeting(meeting)
+
+
+@app.get("/api/voices")
+async def list_voices(voice: VoiceService = Depends(get_voice_service)):
+    """Biblioteca de vozes (só metadados; os vetores nunca saem do banco local)."""
+    reason = voice.unavailable_reason()
+    prints = await asyncio.to_thread(voice.store.list) if voice.store else []
+    return {"enabled": voice.cfg.library_enabled and reason is None, "reason": reason,
+            "voices": [p.public() for p in prints]}
+
+
+@app.delete("/api/voices/{voice_id}")
+async def delete_voice(voice_id: str, voice: VoiceService = Depends(get_voice_service)):
+    if not voice.store or not await asyncio.to_thread(voice.store.delete, voice_id):
+        raise HTTPException(status_code=404, detail="Voz não encontrada.")
+    return {"status": "deleted"}
 
 
 @app.post("/api/meetings/{meeting_id}/regenerate-summary")

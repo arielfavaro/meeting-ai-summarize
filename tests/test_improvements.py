@@ -11,7 +11,7 @@ from backend.services.diarization import DiarizationService, engine_chain
 from backend.services.diarization.local_engines import LocalDiarizationEngines
 from backend.services.alignment import align_transcription_with_diarization, merge_multitrack_segments
 from backend.services.minutes.generator import MinutesConfig, MinutesGenerator
-from backend.services.transcription import build_initial_prompt
+from backend.services.transcription import build_hotwords, build_initial_prompt
 
 HAS_FASTER_WHISPER = importlib.util.find_spec("faster_whisper") is not None and importlib.util.find_spec("librosa") is not None
 
@@ -129,6 +129,13 @@ def test_diarization_falls_back_to_local_engine():
     assert engine_chain("inexistente") == ["pyannote", "speechbrain", "acoustic"]
 
 
+def test_whisper_hotwords_carry_terms_to_every_window():
+    hotwords = build_hotwords(["Ariel", " Mariana ", "Kubernetes", "Ariel", ""])
+    assert hotwords == "Ariel, Mariana, Kubernetes"
+    assert build_hotwords([]) is None
+    assert len(build_hotwords([f"termo{i}" for i in range(500)])) <= 300
+
+
 def test_whisper_initial_prompt_includes_context_terms():
     print("=== TEST 6: Whisper initial prompt ===")
     prompt = build_initial_prompt("pt", ["Ariel", "Mariana", "Kubernetes", "Ariel"])
@@ -157,6 +164,7 @@ class TestImprovements(unittest.TestCase):
 
     def test_whisper_prompt(self):
         test_whisper_initial_prompt_includes_context_terms()
+        test_whisper_hotwords_carry_terms_to_every_window()
 
 
 if __name__ == "__main__":

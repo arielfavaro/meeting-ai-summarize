@@ -16,8 +16,13 @@ services:
       - ./tests:/app/tests
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma4:12b}
-      - OLLAMA_NUM_CTX=${OLLAMA_NUM_CTX:-32768}
+      - OLLAMA_NUM_CTX=${OLLAMA_NUM_CTX:-65536}
+      - LLAMACPP_BASE_URL=${LLAMACPP_BASE_URL:-http://llamacpp:8080}
+      - LLAMACPP_MODEL=${LLAMACPP_MODEL:-qwen3.6-35b-a3b}
+      - LLAMACPP_CTX=${LLAMACPP_CTX:-65536}
+      - MINUTES_REPEAT_PENALTY=${MINUTES_REPEAT_PENALTY:-1.15}
       - OLLAMA_NUM_PREDICT=${OLLAMA_NUM_PREDICT:-4096}
       - MINUTES_CHUNK_TOKENS=${MINUTES_CHUNK_TOKENS:-6000}
       - SPEAKER_NAME_MIN_CONFIDENCE=${SPEAKER_NAME_MIN_CONFIDENCE:-0.75}
@@ -34,6 +39,13 @@ services:
       - ENABLE_PYANNOTE=${ENABLE_PYANNOTE:-false}
       - DIARIZATION_ENGINE=${DIARIZATION_ENGINE:-auto}
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
+      - ALIGNMENT_ENGINE=${ALIGNMENT_ENGINE:-wav2vec2}
+      - VOICE_FEATURES_ENABLED=${VOICE_FEATURES_ENABLED:-true}
+      - VOICE_MERGE_THRESHOLD=${VOICE_MERGE_THRESHOLD:-0.70}
+      - VOICE_CROSS_TRACK_THRESHOLD=${VOICE_CROSS_TRACK_THRESHOLD:-0.60}
+      - VOICE_LIBRARY_ENABLED=${VOICE_LIBRARY_ENABLED:-true}
+      - VOICE_MATCH_THRESHOLD=${VOICE_MATCH_THRESHOLD:-0.65}
+      - VOICE_MATCH_MARGIN=${VOICE_MATCH_MARGIN:-0.08}
       # Privacidade: modelos só do disco local e nenhuma telemetria.
       # Para baixar modelos (uma vez): docker compose run --rm -e HF_HUB_OFFLINE=0 app python -m backend.scripts.download_models
       - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
@@ -52,9 +64,35 @@ services:
     restart: unless-stopped
     ports:
       - "11435:11434"
+    environment:
+      # Flash attention + KV cache em 8 bits: ~metade da VRAM do contexto, permite janelas de 64k
+      # (reunião inteira numa passada só, sem map-reduce) com perda de qualidade desprezível.
+      - OLLAMA_FLASH_ATTENTION=${OLLAMA_FLASH_ATTENTION:-1}
+      - OLLAMA_KV_CACHE_TYPE=${OLLAMA_KV_CACHE_TYPE:-q8_0}
     volumes:
       # Bind mount no host: modelos LLM (Llama, Qwen, Mistral) salvos fora do VHDX do WSL
       - ./data/ollama:/root/.ollama
+    networks:
+      - meeting-net
+
+  # llama-server (llama.cpp) — OPCIONAL, para modelos MoE grandes (ex.: Qwen3.6-35B-A3B) com os
+  # "experts" na RAM e atenção/KV na GPU. Sem porta exposta: só a aplicação acessa (rede interna).
+  # Uso: coloque o .gguf em data/llamacpp, defina LLM_PROVIDER=llamacpp no .env e suba com
+  #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile llamacpp up -d
+  llamacpp:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    container_name: meeting-ai-llamacpp
+    profiles: ["llamacpp"]
+    restart: unless-stopped
+    command: >
+      -m /models/${LLAMACPP_MODEL_FILE:-Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf}
+      --alias ${LLAMACPP_MODEL:-qwen3.6-35b-a3b}
+      --host 0.0.0.0 --port 8080
+      -c ${LLAMACPP_CTX:-65536} -ngl 99 --n-cpu-moe ${LLAMACPP_N_CPU_MOE:-24}
+      -fa on --cache-type-k q8_0 --cache-type-v q8_0 --jinja
+      ${LLAMACPP_EXTRA_ARGS:-}
+    volumes:
+      - ./data/llamacpp:/models:ro
     networks:
       - meeting-net
 

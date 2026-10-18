@@ -40,6 +40,8 @@ def speakers_block(speaker_ids: List[str], speaker_map: Dict[str, str], sources:
         name = speaker_map.get(sid)
         if name and name != sid and sources.get(sid) == "user":
             lines.append(f"- {sid} — nome confirmado: {name}")
+        elif name and name != sid and sources.get(sid) == "voice":
+            lines.append(f"- {sid} — identificado pela voz: {name}")
         else:
             lines.append(f"- {sid} — nome desconhecido")
     return "\n".join(lines)
